@@ -51,12 +51,15 @@ RUN strip target/release/clutch-node
 #==============================================================================
 # Runtime Stage - Minimal Debian image
 #==============================================================================
-FROM debian:bookworm-slim
+FROM debian:12.8-slim
 
-# Install only essential runtime dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Install only essential runtime dependencies and apply security updates
+RUN apt-get update && \
+    apt-get upgrade -y && \
+    apt-get install -y --no-install-recommends \
     ca-certificates \
     tzdata \
+    && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
