@@ -25,7 +25,7 @@ pub async fn handle_request_response(
     blockchain: &Arc<Mutex<Blockchain>>,
 ) {
     match event {
-        RequestResponseEvent::Message { peer, message } => match message {
+        RequestResponseEvent::Message { peer, message, .. } => match message {
             RequestResponseMessage::Request {
                 request_id,
                 request,
@@ -42,6 +42,7 @@ pub async fn handle_request_response(
             peer,
             request_id,
             error: outbound_failure,
+            ..
         } => {
             error!(
                 "Failed to send request to peer {:?} with request_id {:?}: {:?}",
@@ -52,13 +53,14 @@ pub async fn handle_request_response(
             peer,
             request_id,
             error: outbound_failure,
+            ..
         } => {
             error!(
                 "Failed to receive request from peer {:?} with request_id {:?}: {:?}",
                 peer, request_id, outbound_failure
             );
         }
-        RequestResponseEvent::ResponseSent { peer, request_id } => {
+        RequestResponseEvent::ResponseSent { peer, request_id, .. } => {
             debug!("Response sent to peer {} for request {}", peer, request_id);
         }
     }

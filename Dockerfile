@@ -21,31 +21,29 @@ ENV RUSTFLAGS="-C link-arg=-s"
 ENV CC=clang
 ENV CXX=clang++
 
+# Install nightly toolchain so Cargo can parse newer manifest features (eg. edition2024)
+RUN rustup toolchain install nightly && rustup default nightly && rustup show
+
 # Create app user for security
 RUN groupadd -g 1000 clutch && \
     useradd -r -u 1000 -g clutch -s /bin/sh clutch
 
 WORKDIR /usr/src/clutch-node
 
-# Copy dependency file (do not copy Cargo.lock to avoid lockfile-format mismatches
-# between the host and the builder image's Cargo). Generate a lockfile inside the
-# builder so Cargo will create one compatible with the toolchain in this image.
-COPY Cargo.toml ./
+# Copy dependency files for better caching
+COPY Cargo.toml Cargo.lock ./
 
-# Create dummy source, generate a lockfile compatible with the builder, and build
-# dependencies. This avoids "lock file version X was found" errors when the
-# host Cargo.lock was produced by a newer Cargo than the image provides.
+# Create dummy source and build dependencies
 RUN mkdir src && \
     echo "fn main() {}" > src/main.rs && \
-    cargo generate-lockfile && \
-    cargo build --release && \
+    cargo +nightly build --release && \
     rm -rf src
 
 # Copy actual source code
 COPY src ./src
 
 # Build the final binary
-RUN cargo build --release --bin clutch-node
+RUN cargo +nightly build --release --bin clutch-node
 
 # Strip the binary to reduce size further
 RUN strip target/release/clutch-node
