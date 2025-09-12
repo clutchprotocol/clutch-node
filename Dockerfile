@@ -1,6 +1,6 @@
 # Multi-stage build for optimized image size
 # Build arguments for flexibility
-ARG RUST_VERSION=1.81
+ARG RUST_VERSION=1.89
 
 #==============================================================================
 # Builder Stage - Use Debian slim for better compatibility with RocksDB
@@ -21,8 +21,8 @@ ENV RUSTFLAGS="-C link-arg=-s"
 ENV CC=clang
 ENV CXX=clang++
 
-# Install nightly toolchain so Cargo can parse newer manifest features (eg. edition2024)
-RUN rustup toolchain install nightly && rustup default nightly && rustup show
+# Use the stable toolchain provided by the base image
+# (no rustup toolchain install; we rely on rust:${RUST_VERSION}-slim image)
 
 # Create app user for security
 RUN groupadd -g 1000 clutch && \
@@ -36,14 +36,14 @@ COPY Cargo.toml Cargo.lock ./
 # Create dummy source and build dependencies
 RUN mkdir src && \
     echo "fn main() {}" > src/main.rs && \
-    cargo +nightly build --release && \
+    cargo build --release && \
     rm -rf src
 
 # Copy actual source code
 COPY src ./src
 
-# Build the final binary
-RUN cargo +nightly build --release --bin clutch-node
+# Build the final binary with stable cargo
+RUN cargo build --release --bin clutch-node
 
 # Strip the binary to reduce size further
 RUN strip target/release/clutch-node
