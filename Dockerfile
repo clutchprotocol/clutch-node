@@ -1,6 +1,6 @@
 # Multi-stage build for optimized image size
 # Build arguments for flexibility
-ARG RUST_VERSION=1.76
+ARG RUST_VERSION=1.81
 
 #==============================================================================
 # Builder Stage - Use Debian slim for better compatibility with RocksDB
@@ -27,12 +27,17 @@ RUN groupadd -g 1000 clutch && \
 
 WORKDIR /usr/src/clutch-node
 
-# Copy dependency files for better caching
-COPY Cargo.toml Cargo.lock ./
+# Copy dependency file (do not copy Cargo.lock to avoid lockfile-format mismatches
+# between the host and the builder image's Cargo). Generate a lockfile inside the
+# builder so Cargo will create one compatible with the toolchain in this image.
+COPY Cargo.toml ./
 
-# Create dummy source and build dependencies
+# Create dummy source, generate a lockfile compatible with the builder, and build
+# dependencies. This avoids "lock file version X was found" errors when the
+# host Cargo.lock was produced by a newer Cargo than the image provides.
 RUN mkdir src && \
     echo "fn main() {}" > src/main.rs && \
+    cargo generate-lockfile && \
     cargo build --release && \
     rm -rf src
 
