@@ -3,9 +3,16 @@
 ARG RUST_VERSION=1.89
 
 #==============================================================================
-# Builder Stage - Use Debian slim for better compatibility with RocksDB
+# Builder Stage - Use Debian Bookworm for reliable apt mirrors (avoids trixie)
 #==============================================================================
-FROM rust:${RUST_VERSION}-slim AS builder
+FROM rust:${RUST_VERSION}-slim-bookworm AS builder
+
+# Configure apt: retries, long timeout, use regional mirror (ftp.us.debian.org)
+RUN echo 'Acquire::Retries "5"; Acquire::http::Timeout "300";' > /etc/apt/apt.conf.d/80-retries && \
+    rm -f /etc/apt/sources.list.d/*.list 2>/dev/null || true && \
+    echo 'deb http://ftp.us.debian.org/debian bookworm main' > /etc/apt/sources.list && \
+    echo 'deb http://ftp.us.debian.org/debian bookworm-updates main' >> /etc/apt/sources.list && \
+    echo 'deb http://security.debian.org/debian-security bookworm-security main' >> /etc/apt/sources.list
 
 # Install build dependencies for static linking
 RUN apt-get update && apt-get install -y \
@@ -22,11 +29,11 @@ ENV CC=clang
 ENV CXX=clang++
 
 # Use the stable toolchain provided by the base image
-# (no rustup toolchain install; we rely on rust:${RUST_VERSION}-slim image)
+# (no rustup toolchain install; we rely on rust:${RUST_VERSION}-slim-bookworm)
 
-# Create app user for security
-RUN groupadd -g 1000 clutch && \
-    useradd -r -u 1000 -g clutch -s /bin/sh clutch
+# Create app user for security (UID 999 to match runtime stage)
+RUN groupadd -g 999 clutch && \
+    useradd -r -u 999 -g clutch -s /bin/sh clutch
 
 WORKDIR /usr/src/clutch-node
 
@@ -49,22 +56,30 @@ RUN cargo build --release --bin clutch-node
 RUN strip target/release/clutch-node
 
 #==============================================================================
-# Runtime Stage - Minimal Debian image
+# Runtime Stage - Minimal Debian image (matching builder GLIBC version)
 #==============================================================================
-FROM debian:12.8-slim
+FROM debian:bookworm-slim
 
-# Install only essential runtime dependencies and apply security updates
+# Configure apt: retries, 5min timeout for slow networks
+RUN echo 'Acquire::Retries "5"; Acquire::http::Timeout "300";' > /etc/apt/apt.conf.d/80-retries
+
+# Use regional mirror (ftp.us.debian.org) - often more reliable in Docker
+RUN rm -f /etc/apt/sources.list.d/*.list 2>/dev/null || true && \
+    echo 'deb http://ftp.us.debian.org/debian bookworm main' > /etc/apt/sources.list && \
+    echo 'deb http://ftp.us.debian.org/debian bookworm-updates main' >> /etc/apt/sources.list && \
+    echo 'deb http://security.debian.org/debian-security bookworm-security main' >> /etc/apt/sources.list
+
+# Install only essential runtime dependencies (skip upgrade to reduce fetch)
 RUN apt-get update && \
-    apt-get upgrade -y && \
     apt-get install -y --no-install-recommends \
     ca-certificates \
     tzdata \
     && apt-get clean \
     && rm -rf /var/lib/apt/lists/*
 
-# Create non-root user
-RUN groupadd -g 1000 clutch && \
-    useradd -r -u 1000 -g clutch -s /bin/sh clutch
+# Create non-root user (UID 999 to avoid SYS_UID_MAX warning)
+RUN groupadd -g 999 clutch && \
+    useradd -r -u 999 -g clutch -s /bin/sh clutch
 
 # Create directories with proper permissions
 RUN mkdir -p /usr/local/bin /app/config && \
