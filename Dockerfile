@@ -1,4 +1,5 @@
 # Multi-stage build for optimized image size
+# Build: docker build -t clutch-node:latest .
 # Build arguments for flexibility
 ARG RUST_VERSION=1.89
 

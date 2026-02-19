@@ -1,6 +1,6 @@
 services:
   node1:
-    image: clutch-node
+    image: ghcr.io/clutchprotocol/clutch-node:latest
     container_name: clutch-node-container-node1
     networks:
       - clutch-network
@@ -13,7 +13,7 @@ services:
     command: ["--env", "node1"]
 
   node2:
-    image: clutch-node
+    image: ghcr.io/clutchprotocol/clutch-node:latest
     container_name: clutch-node-container-node2
     networks:
       - clutch-network
@@ -26,7 +26,7 @@ services:
     command: ["--env", "node2"]
 
   node3:
-    image: clutch-node
+    image: ghcr.io/clutchprotocol/clutch-node:latest
     container_name: clutch-node-container-node3
     networks:
       - clutch-network
