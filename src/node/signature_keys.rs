@@ -39,10 +39,15 @@ impl SignatureKeys {
         address_key
     }
 
+    /// Strip 0x/0X prefix for hex parsing (Rust hex crate does not accept it)
+    fn strip_hex_prefix(s: &str) -> &str {
+        s.trim_start_matches("0x").trim_start_matches("0X")
+    }
+
     pub fn sign(secret_key: &str, data: &[u8]) -> (String, String, i32) {
         let secp = Secp256k1::new();
 
-        let secret_key_bytes = hex::decode(secret_key).unwrap();
+        let secret_key_bytes = hex::decode(Self::strip_hex_prefix(secret_key)).unwrap();
         let secret_key = SecretKey::from_slice(&secret_key_bytes).unwrap();
 
         // Create a message hash (Keccak-256 of the data)
@@ -82,8 +87,8 @@ impl SignatureKeys {
         let message = Message::from_digest_slice(&message_hash)
             .map_err(|_| "Message could not be created from hash".to_string())?;
 
-        let sig_r = Vec::from_hex(r).map_err(|_| "Invalid hex in r".to_string())?;
-        let sig_s = Vec::from_hex(s).map_err(|_| "Invalid hex in s".to_string())?;
+        let sig_r = Vec::from_hex(Self::strip_hex_prefix(r)).map_err(|_| "Invalid hex in r".to_string())?;
+        let sig_s = Vec::from_hex(Self::strip_hex_prefix(s)).map_err(|_| "Invalid hex in s".to_string())?;
         let signature_data = [&sig_r[..], &sig_s[..]].concat();
         let recovery_id =
             RecoveryId::from_i32(v - 27).map_err(|_| "Invalid recovery ID".to_string())?;
