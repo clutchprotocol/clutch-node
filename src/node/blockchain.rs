@@ -57,6 +57,10 @@ impl Blockchain {
         AccountState::get_current_state(public_key, &self.db)
     }
 
+    pub fn get_account_balance(&self, public_key: &String) -> u64 {
+        self.get_account_state(public_key).balance
+    }
+
     pub fn get_current_nonce(&self, public_key: &String) -> Result<u64, String> {
         AccountState::get_current_nonce(public_key, &self.db)
     }

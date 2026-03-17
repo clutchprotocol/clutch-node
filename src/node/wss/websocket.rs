@@ -108,6 +108,9 @@ impl WebSocket {
             "get_next_nonce" => {
                 Self::handle_get_next_nonce(params, id, blockchain).await
             }
+            "get_account_balance" => {
+                Self::handle_get_account_balance(params, id, blockchain).await
+            }
             _ => {
                 warn!("Unknown method '{}' in request: {}", method, request_str);
                 Some(json_rpc_error_response(-32601, "Method not found", id))
@@ -277,6 +280,30 @@ impl WebSocket {
                 Some(json_rpc_error_response(-32000, &error_msg, id))
             }
         }
+    }
+
+    async fn handle_get_account_balance(
+        params: serde_json::Value,
+        id: serde_json::Value,
+        blockchain: &Arc<Mutex<Blockchain>>,
+    ) -> Option<String> {
+        #[derive(serde::Deserialize)]
+        struct GetBalanceParams {
+            address: String,
+        }
+
+        let params: GetBalanceParams = match serde_json::from_value(params) {
+            Ok(p) => p,
+            Err(e) => {
+                let error_msg = format!("Invalid params: expected object with 'address' field: {}", e);
+                warn!("{}", error_msg);
+                return Some(json_rpc_error_response(-32602, &error_msg, id));
+            }
+        };
+
+        let blockchain = blockchain.lock().await;
+        let balance = blockchain.get_account_balance(&params.address);
+        Some(json_rpc_success_response(serde_json::json!({ "balance": balance }), id))
     }
 }
 
