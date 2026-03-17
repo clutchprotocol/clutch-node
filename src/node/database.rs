@@ -146,4 +146,30 @@ impl Database {
             None => Err("Database connection is closed".to_string()),
         }
     }
+
+    /// Iterate over key-value pairs in a column family whose keys start with the given prefix.
+    pub fn prefix_scan(
+        &self,
+        cf_name: &str,
+        prefix: &[u8],
+    ) -> Result<Vec<(Vec<u8>, Vec<u8>)>, String> {
+        match &self.db {
+            Some(db) => {
+                let cf_handle = db
+                    .cf_handle(cf_name)
+                    .ok_or(format!("Column family '{}' not found", cf_name))?;
+                let mut entries = Vec::new();
+                let iter = db.prefix_iterator_cf(cf_handle, prefix);
+
+                for item in iter {
+                    match item {
+                        Ok((key, value)) => entries.push((key.to_vec(), value.to_vec())),
+                        Err(e) => return Err(e.to_string()),
+                    }
+                }
+                Ok(entries)
+            }
+            None => Err("Database connection is closed".to_string()),
+        }
+    }
 }

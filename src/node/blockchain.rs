@@ -10,6 +10,7 @@ use crate::node::aura::Aura;
 use crate::node::database::Database;
 use crate::node::file_utils::write_to_file;
 use crate::node::node_services::NodeServices;
+use crate::node::transactions::ride_request::{AvailableRideRequest, MapBounds, RideRequest};
 use crate::node::transactions::transaction::Transaction;
 
 pub struct Blockchain {
@@ -136,6 +137,10 @@ impl Blockchain {
 
     pub fn get_transactions_from_pool(&self) -> Result<Vec<Transaction>, String> {
         TransactionPool::get_transactions(&self.db)
+    }
+
+    pub fn list_available_ride_requests(&self, bounds: Option<MapBounds>) -> Result<Vec<AvailableRideRequest>, String> {
+        RideRequest::list_available_ride_requests(&self.db, bounds)
     }
 
     pub fn author_new_block(&self) -> Result<Block, String> {

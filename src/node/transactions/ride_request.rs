@@ -12,6 +12,25 @@ pub struct RideRequest {
     pub fare: u64,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AvailableRideRequest {
+    pub tx_hash: String,
+    pub pickup_location: Coordinates,
+    pub dropoff_location: Coordinates,
+    pub fare: u64,
+    pub passenger_address: String,
+}
+
+/// Map viewport bounds for filtering ride requests by pickup location.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MapBounds {
+    pub min_lat: f64,
+    pub max_lat: f64,
+    pub min_lng: f64,
+    pub max_lng: f64,
+}
+
 impl RideRequest {
     pub fn verify_state(&self, from: &String, db: &Database) -> Result<(), String> {
         let passenger_account_state = AccountState::get_current_state(from, &db);
@@ -92,6 +111,64 @@ impl RideRequest {
             Ok(None) => Ok(None),
             Err(_) => Err("Database error occurred".to_string()),
         }
+    }
+
+    /// Lists ride requests that are still available (no RideAcceptance yet).
+    /// Uses prefix iteration over `ride_request_*` keys and filters out accepted requests.
+    /// Optionally filters by map bounds (pickup_location must be inside the bounding box).
+    pub fn list_available_ride_requests(
+        db: &Database,
+        bounds: Option<MapBounds>,
+    ) -> Result<Vec<AvailableRideRequest>, String> {
+        const PREFIX: &str = "ride_request_";
+
+        let entries = db.prefix_scan("state", PREFIX.as_bytes())?;
+        let mut result = Vec::new();
+
+        for (key, value) in entries {
+            // Only main ride request keys (no ":from" or ":ride_acceptance" suffix)
+            let key_str = String::from_utf8(key.clone()).map_err(|_| "Invalid UTF-8 in key".to_string())?;
+            if key_str.contains(':') {
+                continue;
+            }
+
+            let tx_hash = key_str
+                .strip_prefix(PREFIX)
+                .ok_or("Invalid ride request key")?
+                .to_string();
+
+            // Skip if already accepted
+            if Self::get_ride_acceptance(&tx_hash, db)?.is_some() {
+                continue;
+            }
+
+            let ride_request_str =
+                String::from_utf8(value).map_err(|_| "Failed to decode UTF-8 string".to_string())?;
+            let ride_request: RideRequest =
+                serde_json::from_str(&ride_request_str).map_err(|_| "Failed to deserialize RideRequest".to_string())?;
+
+            // Filter by map bounds (pickup_location) if provided
+            if let Some(ref b) = bounds {
+                let lat = ride_request.pickup_location.latitude;
+                let lng = ride_request.pickup_location.longitude;
+                if lat < b.min_lat || lat > b.max_lat || lng < b.min_lng || lng > b.max_lng {
+                    continue;
+                }
+            }
+
+            let passenger_address = Self::get_from(&tx_hash, db)?
+                .unwrap_or_else(|| String::new());
+
+            result.push(AvailableRideRequest {
+                tx_hash,
+                pickup_location: ride_request.pickup_location,
+                dropoff_location: ride_request.dropoff_location,
+                fare: ride_request.fare,
+                passenger_address,
+            });
+        }
+
+        Ok(result)
     }
 
     fn construct_ride_request_key(ride_request_tx_hash: &str) -> Vec<u8> {

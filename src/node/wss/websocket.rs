@@ -1,5 +1,6 @@
 use crate::node::blockchain::Blockchain;
 use crate::node::blocks::block::Block;
+use crate::node::transactions::ride_request::MapBounds;
 use crate::node::transactions::transaction::Transaction;
 use crate::node::p2p_server::{GossipMessageType, P2PServer, P2PServerCommand};
 use crate::node::rlp_encoding::encode;
@@ -110,6 +111,9 @@ impl WebSocket {
             }
             "get_account_balance" => {
                 Self::handle_get_account_balance(params, id, blockchain).await
+            }
+            "list_ride_requests" => {
+                Self::handle_list_ride_requests(params, id, blockchain).await
             }
             _ => {
                 warn!("Unknown method '{}' in request: {}", method, request_str);
@@ -304,6 +308,39 @@ impl WebSocket {
         let blockchain = blockchain.lock().await;
         let balance = blockchain.get_account_balance(&params.address);
         Some(json_rpc_success_response(serde_json::json!({ "balance": balance }), id))
+    }
+
+    async fn handle_list_ride_requests(
+        params: serde_json::Value,
+        id: serde_json::Value,
+        blockchain: &Arc<Mutex<Blockchain>>,
+    ) -> Option<String> {
+        // Optional bounds: { minLat, maxLat, minLng, maxLng } - all optional, omit for no filter
+        let bounds: Option<MapBounds> = if params.is_object() && !params.as_object().unwrap().is_empty() {
+            match serde_json::from_value(params) {
+                Ok(b) => Some(b),
+                Err(e) => {
+                    let error_msg = format!("Invalid params for 'list_ride_requests': expected {{ minLat, maxLat, minLng, maxLng }}: {}", e);
+                    warn!("{}", error_msg);
+                    return Some(json_rpc_error_response(-32602, &error_msg, id));
+                }
+            }
+        } else {
+            None
+        };
+
+        let blockchain = blockchain.lock().await;
+        match blockchain.list_available_ride_requests(bounds) {
+            Ok(requests) => {
+                let result = serde_json::to_value(requests).unwrap_or(serde_json::Value::Array(vec![]));
+                Some(json_rpc_success_response(result, id))
+            }
+            Err(e) => {
+                let error_msg = format!("Failed to list ride requests: {}", e);
+                error!("{}", error_msg);
+                Some(json_rpc_error_response(-32000, &error_msg, id))
+            }
+        }
     }
 }
 
