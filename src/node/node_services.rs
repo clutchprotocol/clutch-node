@@ -154,31 +154,61 @@ impl NodeServices {
         command_tx_p2p: tokio::sync::mpsc::Sender<P2PServerCommand>,
     ) {
         tokio::spawn(async move {
+            // Initial delay to allow libp2p connections to establish
             tokio::time::sleep(Duration::from_secs(3)).await;
 
-            let blockchain = blockchain.lock().await;
-            let connected_peers = P2PServer::get_connected_peers_command(command_tx_p2p.clone())
-                .await
-                .unwrap();
+            // Retry until at least one peer is connected (e.g. bootstrap node)
+            const MAX_RETRIES: u32 = 15;
+            const RETRY_INTERVAL_SECS: u64 = 2;
 
-            info!("connected peers: {:?}", connected_peers);
+            let mut peer_id = None;
+            for attempt in 1..=MAX_RETRIES {
+                let peers_result = P2PServer::get_connected_peers_command(command_tx_p2p.clone())
+                    .await
+                    .map_err(|e| e.to_string());
+                match peers_result {
+                    Ok(connected_peers) => {
+                        peer_id = connected_peers.iter().next().cloned();
+                        if peer_id.is_some() {
+                            info!("connected peers: {:?}", connected_peers);
+                            break;
+                        }
+                        if attempt < MAX_RETRIES {
+                            debug!(
+                                "No peers connected yet (attempt {}/{}), retrying in {}s",
+                                attempt, MAX_RETRIES, RETRY_INTERVAL_SECS
+                            );
+                            tokio::time::sleep(Duration::from_secs(RETRY_INTERVAL_SECS)).await;
+                        }
+                    }
+                    Err(msg) => {
+                        error!("Failed to get connected peers: {}", msg);
+                        if attempt < MAX_RETRIES {
+                            tokio::time::sleep(Duration::from_secs(RETRY_INTERVAL_SECS)).await;
+                        }
+                    }
+                }
+            }
 
-            if let Some(peer_id) = connected_peers.iter().next() {
-                debug!("Selected peer for synchronization: {:?}", peer_id);
+            if let Some(pid) = peer_id {
+                debug!("Selected peer for synchronization: {:?}", pid);
 
+                let blockchain = blockchain.lock().await;
                 let handshake = blockchain.handshake().unwrap();
                 let encoded_handshake = encode(&handshake);
 
-                P2PServer::send_direct_message_command(
+                if let Err(e) = P2PServer::send_direct_message_command(
                     command_tx_p2p.clone(),
-                    peer_id.clone(),
+                    pid,
                     DirectMessageType::Handshake,
                     &encoded_handshake,
                 )
                 .await
-                .expect_err("Failed to send handshake message");
+                {
+                    error!("Failed to send handshake: {}", e);
+                }
             } else {
-                error!("Failed to select a peer from the connected peers set.");
+                error!("Failed to select a peer from the connected peers set after {} attempts. Ensure bootstrap_nodes are correct and node1 is reachable.", MAX_RETRIES);
             }
         });
     }
