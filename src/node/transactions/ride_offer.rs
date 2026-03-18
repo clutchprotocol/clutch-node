@@ -10,6 +10,14 @@ pub struct RideOffer {
     pub fare: u64,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AvailableRideOffer {
+    pub tx_hash: String,
+    pub ride_request_tx_hash: String,
+    pub fare: u64,
+    pub driver_address: String,
+}
+
 impl RideOffer {
     pub fn verify_state(&self, db: &Database) -> Result<(), String> {
         let ride_request_tx_hash = &self.ride_request_transaction_hash;
@@ -92,6 +100,68 @@ impl RideOffer {
             Ok(None) => Ok(None),
             Err(_) => Err("Database error occurred".to_string()),
         }
+    }
+
+    /// Lists ride offers for a specific ride request.
+    pub fn list_ride_offers_for_request(
+        db: &Database,
+        ride_request_tx_hash: Option<&str>,
+    ) -> Result<Vec<AvailableRideOffer>, String> {
+        const PREFIX: &str = "ride_offer_";
+
+        let entries = db.prefix_scan("state", PREFIX.as_bytes())?;
+        let mut result = Vec::new();
+
+        for (key, value) in entries {
+            let key_str = match String::from_utf8(key) {
+                Ok(k) => k,
+                Err(_) => continue,
+            };
+
+            // Only process main ride offer keys (no ":" in key)
+            if key_str.contains(':') {
+                continue;
+            }
+
+            let tx_hash = match key_str.strip_prefix(PREFIX) {
+                Some(h) => h.to_string(),
+                None => continue,
+            };
+
+            let ride_offer_str = match String::from_utf8(value) {
+                Ok(v) => v,
+                Err(_) => continue,
+            };
+
+            let ride_offer: RideOffer = match serde_json::from_str(&ride_offer_str) {
+                Ok(o) => o,
+                Err(_) => continue,
+            };
+
+            // Filter for the requested ride_request_tx_hash if provided
+            if let Some(req_hash) = ride_request_tx_hash {
+                if ride_offer.ride_request_transaction_hash != req_hash {
+                    continue;
+                }
+            }
+
+            // Skip if this specific offer has been accepted
+            // (Optional: if we only want "active" offers. Usually we do)
+            if Self::get_ride_acceptance(&tx_hash, db)?.is_some() {
+                continue;
+            }
+
+            let driver_address = Self::get_from(&tx_hash, db)?.unwrap_or_else(String::new);
+
+            result.push(AvailableRideOffer {
+                tx_hash,
+                ride_request_tx_hash: ride_offer.ride_request_transaction_hash,
+                fare: ride_offer.fare,
+                driver_address,
+            });
+        }
+
+        Ok(result)
     }
 
     fn construct_ride_offer_key(ride_offer_tx_hash: &str) -> Vec<u8> {

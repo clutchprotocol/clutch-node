@@ -115,6 +115,9 @@ impl WebSocket {
             "list_ride_requests" => {
                 Self::handle_list_ride_requests(params, id, blockchain).await
             }
+            "list_ride_offers" => {
+                Self::handle_list_ride_offers(params, id, blockchain).await
+            }
             _ => {
                 warn!("Unknown method '{}' in request: {}", method, request_str);
                 Some(json_rpc_error_response(-32601, "Method not found", id))
@@ -337,6 +340,45 @@ impl WebSocket {
             }
             Err(e) => {
                 let error_msg = format!("Failed to list ride requests: {}", e);
+                error!("{}", error_msg);
+                Some(json_rpc_error_response(-32000, &error_msg, id))
+            }
+        }
+    }
+
+    async fn handle_list_ride_offers(
+        params: serde_json::Value,
+        id: serde_json::Value,
+        blockchain: &Arc<Mutex<Blockchain>>,
+    ) -> Option<String> {
+        #[derive(serde::Deserialize)]
+        struct GetRideOffersParams {
+            ride_request_tx_hash: Option<String>,
+        }
+
+        let parsed_params: Option<GetRideOffersParams> = if params.is_object() && !params.as_object().unwrap().is_empty() {
+            match serde_json::from_value(params) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    let error_msg = format!("Invalid params: expected object with optional 'ride_request_tx_hash' field: {}", e);
+                    warn!("{}", error_msg);
+                    return Some(json_rpc_error_response(-32602, &error_msg, id));
+                }
+            }
+        } else {
+            None
+        };
+
+        let ride_request_tx_hash = parsed_params.and_then(|p| p.ride_request_tx_hash);
+
+        let blockchain = blockchain.lock().await;
+        match blockchain.list_ride_offers_for_request(ride_request_tx_hash.as_deref()) {
+            Ok(offers) => {
+                let result = serde_json::to_value(offers).unwrap_or(serde_json::Value::Array(vec![]));
+                Some(json_rpc_success_response(result, id))
+            }
+            Err(e) => {
+                let error_msg = format!("Failed to list ride offers: {}", e);
                 error!("{}", error_msg);
                 Some(json_rpc_error_response(-32000, &error_msg, id))
             }
