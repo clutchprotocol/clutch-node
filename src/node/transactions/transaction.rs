@@ -53,7 +53,7 @@ impl Transaction {
             FROM_GENESIS.to_string(),
             0,
             FunctionCall::Transfer(Transfer {
-                to: "0xa300e57228487edb1f5c0e737cbfc72d126b5bc2".to_string(),
+                to: "0x8f19077627cde4848b090c53c83b12956837d5e9".to_string(),
                 value: 90,
             }),
         );
