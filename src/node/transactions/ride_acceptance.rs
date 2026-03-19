@@ -1,14 +1,28 @@
 use crate::node::{
-    account_state::AccountState, database::Database, transactions::ride_request::RideRequest,
+    account_state::AccountState,
+    database::Database,
+    transactions::ride_offer::RideOffer,
+    transactions::ride_request::RideRequest,
 };
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 use serde::{Deserialize, Serialize};
 
-use super::ride_offer::RideOffer;
-
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RideAcceptance {
     pub ride_offer_transaction_hash: String,
+}
+
+/// An active trip: RideAcceptance exists, fare not yet paid, not cancelled.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AvailableActiveTrip {
+    pub tx_hash: String,
+    pub ride_offer_tx_hash: String,
+    pub ride_request_tx_hash: String,
+    pub pickup_location: crate::node::coordinate::Coordinates,
+    pub dropoff_location: crate::node::coordinate::Coordinates,
+    pub fare: u64,
+    pub driver_address: String,
+    pub passenger_address: String,
 }
 
 impl RideAcceptance {
@@ -172,6 +186,92 @@ impl RideAcceptance {
 
     pub fn construct_ride_acceptance_cancel_key(ride_acceptance_tx_hash: &str) -> Vec<u8> {
         format!("ride_acceptance_{}:cancel", ride_acceptance_tx_hash).into_bytes()
+    }
+
+    /// Lists active trips (RideAcceptance with no fare_paid and no cancel).
+    /// Optionally filter by driver_address and/or passenger_address.
+    pub fn list_active_trips(
+        db: &Database,
+        driver_address: Option<&str>,
+        passenger_address: Option<&str>,
+    ) -> Result<Vec<AvailableActiveTrip>, String> {
+        const PREFIX: &str = "ride_offer_";
+        let entries = db.prefix_scan("state", PREFIX.as_bytes())?;
+        let mut result = Vec::new();
+
+        for (key, value) in entries {
+            let key_str = match String::from_utf8(key) {
+                Ok(k) => k,
+                Err(_) => continue,
+            };
+            if key_str.contains(':') {
+                continue;
+            }
+
+            let ride_offer_tx_hash = match key_str.strip_prefix(PREFIX) {
+                Some(h) => h.to_string(),
+                None => continue,
+            };
+
+            let acceptance_tx_hash = match RideOffer::get_ride_acceptance(&ride_offer_tx_hash, db) {
+                Ok(Some(h)) => h,
+                _ => continue,
+            };
+
+            if Self::get_fare_paid(&acceptance_tx_hash, db)?.is_some() {
+                continue;
+            }
+            if Self::get_ride_cancel(&acceptance_tx_hash, db)?.is_some() {
+                continue;
+            }
+
+            let ride_offer = match RideOffer::get_ride_offer(&ride_offer_tx_hash, db)
+                .map_err(|e| e.to_string())?
+            {
+                Some(o) => o,
+                None => continue,
+            };
+
+            let driver_address_val = RideOffer::get_from(&ride_offer_tx_hash, db)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            if let Some(filter) = driver_address {
+                if driver_address_val != filter {
+                    continue;
+                }
+            }
+
+            let passenger_address_val = RideRequest::get_from(&ride_offer.ride_request_transaction_hash, db)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            if let Some(filter) = passenger_address {
+                if passenger_address_val != filter {
+                    continue;
+                }
+            }
+
+            let ride_request = match RideRequest::get_ride_request(&ride_offer.ride_request_transaction_hash, db)
+                .map_err(|e| e.to_string())?
+            {
+                Some(r) => r,
+                None => continue,
+            };
+
+            result.push(AvailableActiveTrip {
+                tx_hash: acceptance_tx_hash,
+                ride_offer_tx_hash,
+                ride_request_tx_hash: ride_offer.ride_request_transaction_hash,
+                pickup_location: ride_request.pickup_location,
+                dropoff_location: ride_request.dropoff_location,
+                fare: ride_offer.fare,
+                driver_address: driver_address_val,
+                passenger_address: passenger_address_val,
+            });
+        }
+
+        Ok(result)
     }
 }
 

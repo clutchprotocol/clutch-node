@@ -118,6 +118,9 @@ impl WebSocket {
             "list_ride_offers" => {
                 Self::handle_list_ride_offers(params, id, blockchain).await
             }
+            "list_active_trips" => {
+                Self::handle_list_active_trips(params, id, blockchain).await
+            }
             _ => {
                 warn!("Unknown method '{}' in request: {}", method, request_str);
                 Some(json_rpc_error_response(-32601, "Method not found", id))
@@ -379,6 +382,46 @@ impl WebSocket {
             }
             Err(e) => {
                 let error_msg = format!("Failed to list ride offers: {}", e);
+                error!("{}", error_msg);
+                Some(json_rpc_error_response(-32000, &error_msg, id))
+            }
+        }
+    }
+
+    async fn handle_list_active_trips(
+        params: serde_json::Value,
+        id: serde_json::Value,
+        blockchain: &Arc<Mutex<Blockchain>>,
+    ) -> Option<String> {
+        #[derive(serde::Deserialize)]
+        struct ListActiveTripsParams {
+            driver_address: Option<String>,
+            passenger_address: Option<String>,
+        }
+
+        let parsed: ListActiveTripsParams = if params.is_object() {
+            serde_json::from_value(params).unwrap_or(ListActiveTripsParams {
+                driver_address: None,
+                passenger_address: None,
+            })
+        } else {
+            ListActiveTripsParams {
+                driver_address: None,
+                passenger_address: None,
+            }
+        };
+
+        let blockchain = blockchain.lock().await;
+        match blockchain.list_active_trips(
+            parsed.driver_address.as_deref(),
+            parsed.passenger_address.as_deref(),
+        ) {
+            Ok(trips) => {
+                let result = serde_json::to_value(trips).unwrap_or(serde_json::Value::Array(vec![]));
+                Some(json_rpc_success_response(result, id))
+            }
+            Err(e) => {
+                let error_msg = format!("Failed to list active trips: {}", e);
                 error!("{}", error_msg);
                 Some(json_rpc_error_response(-32000, &error_msg, id))
             }
