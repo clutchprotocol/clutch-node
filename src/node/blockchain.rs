@@ -157,6 +157,14 @@ impl Blockchain {
         RideAcceptance::list_active_trips(&self.db, driver_address, passenger_address)
     }
 
+    pub fn list_completed_trips(
+        &self,
+        driver_address: Option<&str>,
+        passenger_address: Option<&str>,
+    ) -> Result<Vec<AvailableActiveTrip>, String> {
+        RideAcceptance::list_completed_trips(&self.db, driver_address, passenger_address)
+    }
+
     pub fn author_new_block(&self) -> Result<Block, String> {
         let latest_block = match self.get_latest_block() {
             Some(block) => block,

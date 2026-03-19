@@ -295,6 +295,100 @@ impl RideAcceptance {
 
         Ok(result)
     }
+
+    /// Lists completed trips: accepted, not cancelled, and total RidePay amount &gt;= offer fare.
+    /// Optionally filter by driver_address and/or passenger_address.
+    pub fn list_completed_trips(
+        db: &Database,
+        driver_address: Option<&str>,
+        passenger_address: Option<&str>,
+    ) -> Result<Vec<AvailableActiveTrip>, String> {
+        const PREFIX: &str = "ride_offer_";
+        let entries = db.prefix_scan("state", PREFIX.as_bytes())?;
+        let mut result = Vec::new();
+
+        for (key, _value) in entries {
+            let key_str = match String::from_utf8(key) {
+                Ok(k) => k,
+                Err(_) => continue,
+            };
+            if key_str.contains(':') {
+                continue;
+            }
+
+            let ride_offer_tx_hash = match key_str.strip_prefix(PREFIX) {
+                Some(h) => h.to_string(),
+                None => continue,
+            };
+
+            let acceptance_tx_hash = match RideOffer::get_ride_acceptance(&ride_offer_tx_hash, db) {
+                Ok(Some(h)) => h,
+                _ => continue,
+            };
+
+            if Self::get_ride_cancel(&acceptance_tx_hash, db)?.is_some() {
+                continue;
+            }
+
+            let ride_offer = match RideOffer::get_ride_offer(&ride_offer_tx_hash, db)
+                .map_err(|e| e.to_string())?
+            {
+                Some(o) => o,
+                None => continue,
+            };
+
+            let fare_paid_so_far: u64 = match Self::get_fare_paid(&acceptance_tx_hash, db)? {
+                Some(v) if v >= 0 => v as u64,
+                Some(_) => 0,
+                None => 0,
+            };
+
+            if fare_paid_so_far < ride_offer.fare {
+                continue;
+            }
+
+            let driver_address_val = RideOffer::get_from(&ride_offer_tx_hash, db)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            if let Some(filter) = driver_address {
+                if driver_address_val != filter {
+                    continue;
+                }
+            }
+
+            let passenger_address_val = RideRequest::get_from(&ride_offer.ride_request_transaction_hash, db)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            if let Some(filter) = passenger_address {
+                if passenger_address_val != filter {
+                    continue;
+                }
+            }
+
+            let ride_request = match RideRequest::get_ride_request(&ride_offer.ride_request_transaction_hash, db)
+                .map_err(|e| e.to_string())?
+            {
+                Some(r) => r,
+                None => continue,
+            };
+
+            result.push(AvailableActiveTrip {
+                tx_hash: acceptance_tx_hash,
+                ride_offer_tx_hash,
+                ride_request_tx_hash: ride_offer.ride_request_transaction_hash,
+                pickup_location: ride_request.pickup_location,
+                dropoff_location: ride_request.dropoff_location,
+                fare: ride_offer.fare,
+                fare_paid: fare_paid_so_far,
+                driver_address: driver_address_val,
+                passenger_address: passenger_address_val,
+            });
+        }
+
+        Ok(result)
+    }
 }
 
 impl Encodable for RideAcceptance {
