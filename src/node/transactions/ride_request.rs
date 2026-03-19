@@ -1,3 +1,4 @@
+use super::tx_hash_pointer::decode_acceptance_pointer_value;
 use crate::node::account_state::AccountState;
 use crate::node::coordinate::Coordinates;
 use crate::node::database::Database;
@@ -92,9 +93,10 @@ impl RideRequest {
     ) -> Result<Option<String>, String> {
         let key = Self::construct_ride_request_acceptance_key(ride_request_tx_hash);
         match db.get("state", &key) {
-            Ok(Some(value)) => match String::from_utf8(value) {
-                Ok(ride_tx_has) => Ok(Some(ride_tx_has)),
-                Err(_) => return Err("Failed to decode UTF-8 string".to_string()),
+            Ok(Some(value)) => match decode_acceptance_pointer_value(&value) {
+                Ok(v) if !v.is_empty() => Ok(Some(v)),
+                Ok(_) => Ok(None),
+                Err(e) => return Err(e),
             },
             Ok(None) => Ok(None),
             Err(_) => Err("Database error occurred".to_string()),

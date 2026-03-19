@@ -1,4 +1,4 @@
-use super::ride_request::RideRequest;
+use super::{ride_request::RideRequest, tx_hash_pointer::decode_acceptance_pointer_value};
 use crate::node::database::Database;
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 use serde::{Deserialize, Serialize};
@@ -78,9 +78,10 @@ impl RideOffer {
     ) -> Result<Option<String>, String> {
         let key = Self::construct_ride_offer_acceptance_key(ride_offer_tx_hash);
         match db.get("state", &key) {
-            Ok(Some(value)) => match String::from_utf8(value) {
-                Ok(v) => Ok(Some(v)),
-                Err(_) => return Err("Failed to decode UTF-8 string".to_string()),
+            Ok(Some(value)) => match decode_acceptance_pointer_value(&value) {
+                Ok(v) if !v.is_empty() => Ok(Some(v)),
+                Ok(_) => Ok(None),
+                Err(e) => return Err(e),
             },
             Ok(None) => {
                 error!(" No data found.{}", &ride_offer_tx_hash);

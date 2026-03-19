@@ -21,8 +21,21 @@ pub struct AvailableActiveTrip {
     pub pickup_location: crate::node::coordinate::Coordinates,
     pub dropoff_location: crate::node::coordinate::Coordinates,
     pub fare: u64,
+    /// Total amount already paid to the driver via RidePay (partial payments supported).
+    pub fare_paid: u64,
     pub driver_address: String,
     pub passenger_address: String,
+}
+
+/// DB keys use the same form as [`crate::node::transactions::transaction::Transaction::calculate_hash`]:
+/// `0x` + lowercase hex. Hub/SDK clients often RLP-encode hashes without `0x`; normalize everywhere.
+fn normalize_transaction_hash(hash: &str) -> String {
+    let t = hash.trim();
+    let hex_part = t
+        .strip_prefix("0x")
+        .or_else(|| t.strip_prefix("0X"))
+        .unwrap_or(t);
+    format!("0x{}", hex_part.to_ascii_lowercase())
 }
 
 impl RideAcceptance {
@@ -93,15 +106,12 @@ impl RideAcceptance {
 
         let ride_request_acceptance_key =
             RideRequest::construct_ride_request_acceptance_key(&ride_request_tx_hash);
-        let ride_request_acceptance_value = serde_json::to_string(&ride_acceptance_tx_hash)
-            .unwrap()
-            .into_bytes();
+        // Store plain hash (no JSON quotes); see `tx_hash_pointer::decode_acceptance_pointer_value`.
+        let ride_request_acceptance_value = ride_acceptance_tx_hash.as_bytes().to_vec();
 
         let ride_offer_acceptance_key =
             RideOffer::construct_ride_offer_acceptance_key(&ride_offer_tx_hash);
-        let ride_offer_acceptance_value = serde_json::to_string(&ride_acceptance_tx_hash)
-            .unwrap()
-            .into_bytes();
+        let ride_offer_acceptance_value = ride_acceptance_tx_hash.as_bytes().to_vec();
 
         let ride_offer = RideOffer::get_ride_offer(&ride_offer_tx_hash, db)
             .unwrap()
@@ -177,18 +187,22 @@ impl RideAcceptance {
     }
 
     pub fn construct_ride_acceptance_key(ride_acceptance_tx_hash: &str) -> Vec<u8> {
-        format!("ride_acceptance_{}", ride_acceptance_tx_hash).into_bytes()
+        let h = normalize_transaction_hash(ride_acceptance_tx_hash);
+        format!("ride_acceptance_{}", h).into_bytes()
     }
 
     pub fn construct_ride_acceptance_fare_paid_key(ride_acceptance_tx_hash: &str) -> Vec<u8> {
-        format!("ride_acceptance_{}:fare_paid", ride_acceptance_tx_hash).into_bytes()
+        let h = normalize_transaction_hash(ride_acceptance_tx_hash);
+        format!("ride_acceptance_{}:fare_paid", h).into_bytes()
     }
 
     pub fn construct_ride_acceptance_cancel_key(ride_acceptance_tx_hash: &str) -> Vec<u8> {
-        format!("ride_acceptance_{}:cancel", ride_acceptance_tx_hash).into_bytes()
+        let h = normalize_transaction_hash(ride_acceptance_tx_hash);
+        format!("ride_acceptance_{}:cancel", h).into_bytes()
     }
 
-    /// Lists active trips (RideAcceptance with no fare_paid and no cancel).
+    /// Lists active trips: accepted ride, not cancelled, and total RidePay amount &lt; offer fare
+    /// (supports partial payments until the full fare is paid).
     /// Optionally filter by driver_address and/or passenger_address.
     pub fn list_active_trips(
         db: &Database,
@@ -199,7 +213,7 @@ impl RideAcceptance {
         let entries = db.prefix_scan("state", PREFIX.as_bytes())?;
         let mut result = Vec::new();
 
-        for (key, value) in entries {
+        for (key, _value) in entries {
             let key_str = match String::from_utf8(key) {
                 Ok(k) => k,
                 Err(_) => continue,
@@ -218,9 +232,6 @@ impl RideAcceptance {
                 _ => continue,
             };
 
-            if Self::get_fare_paid(&acceptance_tx_hash, db)?.is_some() {
-                continue;
-            }
             if Self::get_ride_cancel(&acceptance_tx_hash, db)?.is_some() {
                 continue;
             }
@@ -231,6 +242,16 @@ impl RideAcceptance {
                 Some(o) => o,
                 None => continue,
             };
+
+            let fare_paid_so_far: u64 = match Self::get_fare_paid(&acceptance_tx_hash, db)? {
+                Some(v) if v >= 0 => v as u64,
+                Some(_) => 0,
+                None => 0,
+            };
+
+            if fare_paid_so_far >= ride_offer.fare {
+                continue;
+            }
 
             let driver_address_val = RideOffer::get_from(&ride_offer_tx_hash, db)
                 .ok()
@@ -266,6 +287,7 @@ impl RideAcceptance {
                 pickup_location: ride_request.pickup_location,
                 dropoff_location: ride_request.dropoff_location,
                 fare: ride_offer.fare,
+                fare_paid: fare_paid_so_far,
                 driver_address: driver_address_val,
                 passenger_address: passenger_address_val,
             });

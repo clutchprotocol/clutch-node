@@ -192,7 +192,7 @@ impl Transaction {
             FunctionCall::RideAcceptance(ride_acceptance) => {
                 ride_acceptance.state_transaction(&self.from, &self.hash, db)
             }
-            FunctionCall::RidePay(ride_pay) => ride_pay.state_transaction(&self.from, db),
+            FunctionCall::RidePay(ride_pay) => ride_pay.state_transaction(&self.hash, db),
             FunctionCall::RideCancel(ride_cancel) => ride_cancel.state_transaction(&self.hash, db),
             FunctionCall::ConfirmArrival(confirm_arrival) => confirm_arrival.state_transaction(db),
             FunctionCall::ComplainArrival(complain_arrival) => {
