@@ -1,6 +1,7 @@
 use crate::node::{
     account_state::AccountState,
     database::Database,
+    transactions::address::normalize_address_for_compare,
     transactions::ride_offer::RideOffer,
     transactions::ride_request::RideRequest,
 };
@@ -78,6 +79,26 @@ impl RideAcceptance {
             // Check if this ride offer is already used in another ride.
             if let Ok(Some(_)) = RideOffer::get_ride_acceptance(&ride_offer_transaction_hash, db) {
                 return Err("Ride offer is already linked to a ride.".to_string());
+            }
+
+            // At most one active trip per driver (same model as one concurrent request per passenger).
+            let driver_address = match RideOffer::get_from(ride_offer_transaction_hash, db)? {
+                Some(a) => a,
+                None => {
+                    return Err(
+                        "Failed to retrieve driver address for the ride offer.".to_string(),
+                    );
+                }
+            };
+            let driver_norm = normalize_address_for_compare(&driver_address);
+            let active = Self::list_active_trips(db, None, None)?;
+            if active.iter().any(|t| {
+                normalize_address_for_compare(&t.driver_address) == driver_norm
+            }) {
+                return Err(
+                    "Driver already has an active trip. Complete or cancel it before another ride can be accepted."
+                        .to_string(),
+                );
             }
         } else {
             return Err("Ride offer does not exist or failed to retrieve.".to_string());

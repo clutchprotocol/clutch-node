@@ -2,18 +2,9 @@
 
 use crate::node::database::Database;
 
+use super::address::normalize_address_for_compare;
 use super::ride_acceptance::RideAcceptance;
 use super::ride_request::RideRequest;
-
-/// Normalize address strings for comparison (handles `0x` / `0X` prefix and casing).
-pub fn normalize_address_for_compare(addr: &str) -> String {
-    let t = addr.trim();
-    let hex_part = t
-        .strip_prefix("0x")
-        .or_else(|| t.strip_prefix("0X"))
-        .unwrap_or(t);
-    format!("0x{}", hex_part.to_ascii_lowercase())
-}
 
 /// Returns true if the passenger already has a pending ride request or an active trip.
 pub fn passenger_has_concurrent_request(
