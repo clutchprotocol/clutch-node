@@ -103,6 +103,22 @@ impl RideRequest {
         }
     }
 
+    /// Returns the cancel transaction hash if this ride request has been cancelled by the passenger.
+    pub fn get_ride_request_cancel(
+        ride_request_tx_hash: &str,
+        db: &Database,
+    ) -> Result<Option<String>, String> {
+        let key = Self::construct_ride_request_cancel_key(ride_request_tx_hash);
+        match db.get("state", &key) {
+            Ok(Some(value)) => match String::from_utf8(value) {
+                Ok(s) if !s.is_empty() => Ok(Some(s)),
+                _ => Ok(None),
+            },
+            Ok(None) => Ok(None),
+            Err(_) => Err("Database error occurred".to_string()),
+        }
+    }
+
     pub fn get_from(ride_request_tx_hash: &str, db: &Database) -> Result<Option<String>, String> {
         let key = Self::construct_ride_request_from_key(ride_request_tx_hash);
         match db.get("state", &key) {
@@ -141,6 +157,11 @@ impl RideRequest {
 
             // Skip if already accepted
             if Self::get_ride_acceptance(&tx_hash, db)?.is_some() {
+                continue;
+            }
+
+            // Skip if cancelled by passenger
+            if Self::get_ride_request_cancel(&tx_hash, db)?.is_some() {
                 continue;
             }
 
@@ -183,6 +204,10 @@ impl RideRequest {
 
     pub fn construct_ride_request_acceptance_key(ride_request_tx_hash: &str) -> Vec<u8> {
         format!("ride_request_{}:ride_acceptance", ride_request_tx_hash).into_bytes()
+    }
+
+    pub fn construct_ride_request_cancel_key(ride_request_tx_hash: &str) -> Vec<u8> {
+        format!("ride_request_{}:cancelled", ride_request_tx_hash).into_bytes()
     }
 }
 

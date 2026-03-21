@@ -8,6 +8,7 @@ pub mod ride_cancel;
 pub mod ride_offer;
 pub mod ride_pay;
 pub mod ride_request;
+pub mod ride_request_cancel;
 pub mod transaction;
 pub mod transaction_pool;
 pub mod transfer;

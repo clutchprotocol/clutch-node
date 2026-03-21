@@ -19,6 +19,7 @@ use super::transactions::ride_cancel::RideCancel;
 use super::transactions::ride_offer::RideOffer;
 use super::transactions::ride_pay::RidePay;
 use super::transactions::ride_request::RideRequest;
+use super::transactions::ride_request_cancel::RideRequestCancel;
 use super::transactions::transfer::Transfer;
 
 impl Encodable for FunctionCall {
@@ -52,6 +53,11 @@ impl Encodable for FunctionCall {
             FunctionCall::RideCancel(args) => {
                 stream.begin_list(2);
                 stream.append(&5u8); // Tag for RideCancel
+                stream.append(args);
+            }
+            FunctionCall::RideRequestCancel(args) => {
+                stream.begin_list(2);
+                stream.append(&8u8); // Tag for RideRequestCancel
                 stream.append(args);
             }
             FunctionCall::ConfirmArrival(args) => {
@@ -100,6 +106,10 @@ impl Decodable for FunctionCall {
             5 => {
                 let args: RideCancel = rlp.val_at(1)?;
                 Ok(FunctionCall::RideCancel(args))
+            }
+            8 => {
+                let args: RideRequestCancel = rlp.val_at(1)?;
+                Ok(FunctionCall::RideRequestCancel(args))
             }
             6 => {
                 let args: ConfirmArrival = rlp.val_at(1)?;
