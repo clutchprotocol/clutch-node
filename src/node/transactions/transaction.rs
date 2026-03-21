@@ -10,7 +10,7 @@ use sha2::Digest;
 use sha3::Sha3_256;
 use std::vec;
 
-use super::{function_call::FunctionCall, transfer::Transfer};
+use super::{function_call::FunctionCall, passenger_concurrent, transfer::Transfer};
 
 const FROM_GENESIS: &str = "0xGENESIS";
 
@@ -168,7 +168,16 @@ impl Transaction {
     fn verify_state(&self, db: &Database) -> Result<(), String> {
         match &self.data {
             FunctionCall::Transfer(transfer) => transfer.verify_state(&self.from, db),
-            FunctionCall::RideRequest(ride_request) => ride_request.verify_state(&self.from, db),
+            FunctionCall::RideRequest(ride_request) => {
+                ride_request.verify_state(&self.from, db)?;
+                if passenger_concurrent::passenger_has_concurrent_request(db, &self.from)? {
+                    return Err(
+                        "Passenger already has an active ride request. Cancel or complete it before requesting a new ride."
+                            .to_string(),
+                    );
+                }
+                Ok(())
+            }
             FunctionCall::RideOffer(ride_offer) => ride_offer.verify_state(db),
             FunctionCall::RideAcceptance(ride_acceptance) => {
                 ride_acceptance.verify_state(&self.from, db)
