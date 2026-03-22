@@ -46,7 +46,7 @@ impl Transaction {
             0,
             FunctionCall::Transfer(Transfer {
                 to: "0xdeb4cfb63db134698e1879ea24904df074726cc0".to_string(),
-                value: 30,
+                value: u64::MAX,
             }),
         );
         let tx2 = Self::new_transaction(
