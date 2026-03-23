@@ -49,40 +49,8 @@ impl Transaction {
                 value: u64::MAX,
             }),
         );
-        let tx2 = Self::new_transaction(
-            FROM_GENESIS.to_string(),
-            0,
-            FunctionCall::Transfer(Transfer {
-                to: "0x8f19077627cde4848b090c53c83b12956837d5e9".to_string(),
-                value: 90,
-            }),
-        );
-        let tx3 = Self::new_transaction(
-            FROM_GENESIS.to_string(),
-            0,
-            FunctionCall::Transfer(Transfer {
-                to: "0xac20ff4e42ff243046faaf032068762dd2c018dc".to_string(),
-                value: 80,
-            }),
-        );
-        let tx4 = Self::new_transaction(
-            FROM_GENESIS.to_string(),
-            0,
-            FunctionCall::Transfer(Transfer {
-                to: "0xa91101310bee451ca0e219aba08d8d4dd929f16c".to_string(),
-                value: 20,
-            }),
-        );
-        let tx5 = Self::new_transaction(
-            FROM_GENESIS.to_string(),
-            0,
-            FunctionCall::Transfer(Transfer {
-                to: "0x37adf81cb1f18762042e5da03a55f1e54ba66870".to_string(),
-                value: 45,
-            }),
-        );
 
-        vec![tx1, tx2, tx3, tx4, tx5]
+        vec![tx1]
     }
 
     fn calculate_hash(&self) -> String {
