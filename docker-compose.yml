@@ -1,3 +1,5 @@
+# Clutch Protocol - Node development stack
+# Nodes only. For full stack (API, demo app, Grafana, Prometheus, Seq) use clutch-deploy.
 services:
   node1:
     image: ghcr.io/clutchprotocol/clutch-node:latest
@@ -15,6 +17,8 @@ services:
   node2:
     image: ghcr.io/clutchprotocol/clutch-node:latest
     container_name: clutch-node-container-node2
+    depends_on:
+      - node1
     networks:
       - clutch-network
     ports:
@@ -28,6 +32,8 @@ services:
   node3:
     image: ghcr.io/clutchprotocol/clutch-node:latest
     container_name: clutch-node-container-node3
+    depends_on:
+      - node1
     networks:
       - clutch-network
     ports:
@@ -38,63 +44,6 @@ services:
       - ./config:/app/config:ro
     command: ["--env", "node3"]
 
-  grafana:
-    image: grafana/grafana
-    container_name: grafana-container
-    networks:
-      - clutch-network   
-    ports:
-      - "3030:3030"
-    volumes:
-      - grafana-data:/var/lib/grafana
-      - ./config/monitoring/grafana/datasources.yml:/etc/grafana/provisioning/datasources/datasources.yml:ro
-      - ./config/monitoring/grafana/dashboards.yml:/etc/grafana/provisioning/dashboards/dashboards.yml:ro
-      - ./config/monitoring/grafana/dashboards/clutch-node.json:/etc/grafana/provisioning/dashboards/clutch-node.json:ro
-
-    environment:
-      - GF_SECURITY_ADMIN_PASSWORD=admin  
-      - GF_USERS_ALLOW_SIGN_UP=false
-
-  prometheus:
-    image: prom/prometheus
-    container_name: prometheus-container
-    networks:
-      - clutch-network
-    ports:
-      - "9090:9090"
-    volumes:
-      - prometheus-data:/prometheus  
-      - ./config/monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-    command:
-      - "--config.file=/etc/prometheus/prometheus.yml"
-      - "--storage.tsdb.path=/prometheus"
-      - "--web.console.libraries=/etc/prometheus/console_libraries"
-      - "--web.console.templates=/etc/prometheus/consoles"
-      - "--storage.tsdb.retention.time=200h"
-      - "--web.enable-lifecycle"
-
-  seq:
-    image: datalust/seq
-    container_name: seq-container
-    networks:
-      - clutch-network
-    ports:
-      - "5341:80"
-    volumes:
-      - seq-data:/data
-    environment:
-      - ACCEPT_EULA=Y
-      - SEQ_FIRSTRUN_NOAUTHENTICATION=true  
-  
 networks:
-  clutch-network:  # Shared network for all services
-
-volumes:
-  grafana-data:
-    driver: local
-
-  prometheus-data:
-    driver: local
-
-  seq-data:
-    driver: local
+  clutch-network:
+    driver: bridge
