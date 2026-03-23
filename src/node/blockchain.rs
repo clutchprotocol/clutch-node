@@ -10,7 +10,7 @@ use crate::node::aura::Aura;
 use crate::node::database::Database;
 use crate::node::file_utils::write_to_file;
 use crate::node::node_services::NodeServices;
-use crate::node::transactions::ride_acceptance::{AvailableActiveTrip, RideAcceptance};
+use crate::node::transactions::ride_acceptance::{AvailableActiveTrip, AvailableRecentTrip, RideAcceptance};
 use crate::node::transactions::ride_offer::{AvailableRideOffer, RideOffer};
 use crate::node::transactions::ride_request::{AvailableRideRequest, MapBounds, RideRequest};
 use crate::node::transactions::transaction::Transaction;
@@ -163,6 +163,14 @@ impl Blockchain {
         passenger_address: Option<&str>,
     ) -> Result<Vec<AvailableActiveTrip>, String> {
         RideAcceptance::list_completed_trips(&self.db, driver_address, passenger_address)
+    }
+
+    pub fn list_recent_trips(
+        &self,
+        driver_address: Option<&str>,
+        passenger_address: Option<&str>,
+    ) -> Result<Vec<AvailableRecentTrip>, String> {
+        RideAcceptance::list_recent_trips(&self.db, driver_address, passenger_address)
     }
 
     pub fn author_new_block(&self) -> Result<Block, String> {

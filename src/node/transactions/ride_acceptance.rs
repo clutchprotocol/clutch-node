@@ -28,6 +28,22 @@ pub struct AvailableActiveTrip {
     pub passenger_address: String,
 }
 
+/// A finished trip history entry: full fare paid, or cancelled (not active / in-progress).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AvailableRecentTrip {
+    pub tx_hash: String,
+    pub ride_offer_tx_hash: String,
+    pub ride_request_tx_hash: String,
+    pub pickup_location: crate::node::coordinate::Coordinates,
+    pub dropoff_location: crate::node::coordinate::Coordinates,
+    pub fare: u64,
+    pub fare_paid: u64,
+    pub driver_address: String,
+    pub passenger_address: String,
+    /// `"completed"` (full fare paid, not cancelled) or `"cancelled"`.
+    pub trip_status: String,
+}
+
 /// DB keys use the same form as [`crate::node::transactions::transaction::Transaction::calculate_hash`]:
 /// `0x` + lowercase hex. Hub/SDK clients often RLP-encode hashes without `0x`; normalize everywhere.
 fn normalize_transaction_hash(hash: &str) -> String {
@@ -405,6 +421,106 @@ impl RideAcceptance {
                 fare_paid: fare_paid_so_far,
                 driver_address: driver_address_val,
                 passenger_address: passenger_address_val,
+            });
+        }
+
+        Ok(result)
+    }
+
+    /// Lists recent finished trips: **completed** (full fare paid, not cancelled) or **cancelled**.
+    /// Excludes active in-progress trips (those appear in [`Self::list_active_trips`]).
+    /// Optionally filter by driver_address and/or passenger_address.
+    pub fn list_recent_trips(
+        db: &Database,
+        driver_address: Option<&str>,
+        passenger_address: Option<&str>,
+    ) -> Result<Vec<AvailableRecentTrip>, String> {
+        const PREFIX: &str = "ride_offer_";
+        let entries = db.prefix_scan("state", PREFIX.as_bytes())?;
+        let mut result = Vec::new();
+
+        for (key, _value) in entries {
+            let key_str = match String::from_utf8(key) {
+                Ok(k) => k,
+                Err(_) => continue,
+            };
+            if key_str.contains(':') {
+                continue;
+            }
+
+            let ride_offer_tx_hash = match key_str.strip_prefix(PREFIX) {
+                Some(h) => h.to_string(),
+                None => continue,
+            };
+
+            let acceptance_tx_hash = match RideOffer::get_ride_acceptance(&ride_offer_tx_hash, db) {
+                Ok(Some(h)) => h,
+                _ => continue,
+            };
+
+            let cancelled = Self::get_ride_cancel(&acceptance_tx_hash, db)?.is_some();
+
+            let ride_offer = match RideOffer::get_ride_offer(&ride_offer_tx_hash, db)
+                .map_err(|e| e.to_string())?
+            {
+                Some(o) => o,
+                None => continue,
+            };
+
+            let fare_paid_so_far: u64 = match Self::get_fare_paid(&acceptance_tx_hash, db)? {
+                Some(v) if v >= 0 => v as u64,
+                Some(_) => 0,
+                None => 0,
+            };
+
+            if !cancelled && fare_paid_so_far < ride_offer.fare {
+                continue;
+            }
+
+            let driver_address_val = RideOffer::get_from(&ride_offer_tx_hash, db)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            if let Some(filter) = driver_address {
+                if driver_address_val != filter {
+                    continue;
+                }
+            }
+
+            let passenger_address_val = RideRequest::get_from(&ride_offer.ride_request_transaction_hash, db)
+                .ok()
+                .flatten()
+                .unwrap_or_default();
+            if let Some(filter) = passenger_address {
+                if passenger_address_val != filter {
+                    continue;
+                }
+            }
+
+            let ride_request = match RideRequest::get_ride_request(&ride_offer.ride_request_transaction_hash, db)
+                .map_err(|e| e.to_string())?
+            {
+                Some(r) => r,
+                None => continue,
+            };
+
+            let trip_status = if cancelled {
+                "cancelled".to_string()
+            } else {
+                "completed".to_string()
+            };
+
+            result.push(AvailableRecentTrip {
+                tx_hash: acceptance_tx_hash,
+                ride_offer_tx_hash,
+                ride_request_tx_hash: ride_offer.ride_request_transaction_hash,
+                pickup_location: ride_request.pickup_location,
+                dropoff_location: ride_request.dropoff_location,
+                fare: ride_offer.fare,
+                fare_paid: fare_paid_so_far,
+                driver_address: driver_address_val,
+                passenger_address: passenger_address_val,
+                trip_status,
             });
         }
 
