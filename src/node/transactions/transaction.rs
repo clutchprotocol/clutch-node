@@ -81,14 +81,21 @@ impl Transaction {
         self.signature_v = v;
     }
 
-    fn verify_signature(&self) -> Result<bool, String> {
-        let from_public_key = &self.from;
+    fn verify_signature(&self) -> Result<(), String> {
+        let from_address = &self.from;
         let data = self.hash.as_bytes();
         let r = &self.signature_r;
         let s = &self.signature_s;
         let v = self.signature_v;
 
-        SignatureKeys::verify(from_public_key, data, r, s, v)
+        match SignatureKeys::verify(from_address, data, r, s, v) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err(
+                "Verification failed: transaction signature does not match the from address"
+                    .to_string(),
+            ),
+            Err(e) => Err(e),
+        }
     }
 
     pub fn validate_transactions(
