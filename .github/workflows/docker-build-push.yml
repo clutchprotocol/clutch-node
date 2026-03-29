@@ -99,6 +99,21 @@ jobs:
         if: github.event_name != 'pull_request'
         run: echo ${{ steps.build.outputs.digest }}
 
+  # Optional: same secret as other Clutch repos — PAT with repo access to dispatch on clutch-deploy.
+  trigger-stage-deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Trigger deploy-stage in clutch-deploy
+        continue-on-error: true
+        uses: peter-evans/repository-dispatch@v3
+        with:
+          token: ${{ secrets.CLUTCH_DEPLOY_DISPATCH_TOKEN }}
+          repository: clutchprotocol/clutch-deploy
+          event-type: deploy-stage
+
   update-description:
     needs: build-and-push
     runs-on: ubuntu-latest
