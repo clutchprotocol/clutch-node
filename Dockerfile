@@ -38,8 +38,9 @@ RUN groupadd -g 999 clutch && \
 
 WORKDIR /usr/src/clutch-node
 
-# Copy dependency files for better caching
+# Copy dependency files and Cargo config (retries for flaky networks)
 COPY Cargo.toml Cargo.lock ./
+COPY .cargo ./.cargo
 
 # Create dummy source and build dependencies
 RUN mkdir src && \

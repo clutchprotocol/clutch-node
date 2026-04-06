@@ -1,0 +1,7 @@
+# Used by Docker builds on slow/unstable networks (crates.io index + blob downloads).
+[net]
+retry = 10
+
+[http]
+# Can reduce spurious failures behind some proxies / flaky TLS.
+multiplexing = false
