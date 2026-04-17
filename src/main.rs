@@ -45,5 +45,6 @@ fn initialize_blockchain(config: &AppConfig) -> Blockchain {
         config.author_secret_key.clone(),
         config.developer_mode.clone(),
         config.authorities.clone(),
+        config.block_reward_amount,
     )
 }

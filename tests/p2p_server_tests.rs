@@ -48,6 +48,7 @@ fn initialize_blockchain(name: String) -> Blockchain {
         "0883ddd3d07303b87c954b0c9383f7b78f45e002520fc03a8adc80595dbf6509".to_string(),
         true,
         vec!["0x9b6e8afff8329743cac73dbef83ca3cbf9a74c20".to_string()],
+        50,
     )
 }
 

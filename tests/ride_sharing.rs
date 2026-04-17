@@ -38,6 +38,7 @@ const AUTHOR_2_SECRET_KEY: &str =
 const AUTHOR_3_PUBLIC_KEY: &str = "0xc4f3f661a43e099aedb8e396d9de1a831a1b4adc";
 const AUTHOR_3_SECRET_KEY: &str =
     "2d75bdfabbbaa65d7a182968e579adf2566fbb6931411752dd834c56bbf092c9";
+const BLOCK_REWARD_AMOUNT: u64 = 50;
 
 #[test]
 #[serial]
@@ -106,6 +107,7 @@ fn new_blockchain() -> Blockchain {
         AUTHOR_1_SECRET_KEY.to_string(),
         true,
         authorities,
+        BLOCK_REWARD_AMOUNT,
     );
     blockchain
 }

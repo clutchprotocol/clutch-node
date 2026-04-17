@@ -108,6 +108,18 @@ To get started with Clutch-Node, follow these steps:
     cargo run -- --env node1
     ```
 
+## Block Reward
+
+`clutch-node` supports a fixed author block reward configured per node environment file:
+
+```toml
+block_reward_amount = 50
+```
+
+- The reward is minted on every accepted non-genesis block.
+- The full reward (`100%`) is credited to the block author account (`block.author`).
+- Genesis block does not mint any author reward.
+
 ## Installing Clang on Windows
 Set the `LIBCLANG_PATH` environment variable:
 ```bash

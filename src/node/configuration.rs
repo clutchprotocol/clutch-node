@@ -16,6 +16,7 @@ pub struct AppConfig {
     pub listen_addrs: Vec<String>,
     pub bootstrap_nodes: Vec<String>,
     pub block_authoring_enabled: bool,
+    pub block_reward_amount: u64,
     pub sync_enabled: bool,
     pub serve_metric_enabled: bool,
     pub serve_metric_addr: String,

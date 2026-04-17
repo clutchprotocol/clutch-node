@@ -22,6 +22,7 @@ pub struct Blockchain {
     consensus: Aura,
     author_public_key: String,
     author_secret_key: String,
+    block_reward_amount: u64,
 }
 
 impl Blockchain {
@@ -31,6 +32,7 @@ impl Blockchain {
         author_secret_key: String,
         developer_mode: bool,
         authorities: Vec<String>,
+        block_reward_amount: u64,
     ) -> Blockchain {
         let db = Database::new_db(&name);
         let step_duration = 60 / authorities.len() as u64;
@@ -41,6 +43,7 @@ impl Blockchain {
             consensus: Aura::new(authorities, step_duration),
             author_public_key,
             author_secret_key,
+            block_reward_amount,
         };
 
         Block::genesis_import_block(&blockchain.db);
@@ -89,7 +92,7 @@ impl Blockchain {
         self.consensus.verify_block_author(&block)?;
         block.validate_block(&self.db)?;
         Transaction::validate_transactions(&self.db, &block.transactions)?;
-        Block::add_block_to_chain(&self.db, block);
+        Block::add_block_to_chain(&self.db, block, self.block_reward_amount);
 
         Ok(())
     }

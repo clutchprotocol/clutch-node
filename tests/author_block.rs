@@ -9,6 +9,7 @@ const FROM_SECRET_KEY: &str = "d2c446110cfcecbdf05b2be528e72483de5b6f7ef9c7856df
 const TO_ADDRESS_KEY: &str = "0x8f19077627cde4848b090c53c83b12956837d5e9";
 const AUTHOR_PUBLIC_KEY: &str = "0x9b6e8afff8329743cac73dbef83ca3cbf9a74c20";
 const AUTHOR_SECRET_KEY: &str = "0883ddd3d07303b87c954b0c9383f7b78f45e002520fc03a8adc80595dbf6509";
+const BLOCK_REWARD_AMOUNT: u64 = 50;
 
 #[test]
 fn author_block() {
@@ -19,6 +20,7 @@ fn author_block() {
         AUTHOR_SECRET_KEY.to_string(),
         true,
         authorities,
+        BLOCK_REWARD_AMOUNT,
     );
 
     let transfer_tx = transfer_transaction(1, 20);
@@ -42,6 +44,12 @@ fn author_block() {
 
     let from_account_state = blockchain.get_account_state(&FROM_ADDRESS_KEY.to_string());
     info!("From account state: {:#?}", from_account_state);
+
+    let author_account_state = blockchain.get_account_state(&AUTHOR_PUBLIC_KEY.to_string());
+    assert_eq!(
+        author_account_state.balance, BLOCK_REWARD_AMOUNT,
+        "author should receive exactly one block reward",
+    );
 
     blockchain.shutdown_blockchain();
 }

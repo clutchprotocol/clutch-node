@@ -4,6 +4,7 @@ use tracing::{error, info, warn};
 
 use crate::node::database::Database;
 use crate::node::time_utils::get_current_timespan;
+use crate::node::account_state::AccountState;
 use crate::node::transactions::transaction::Transaction;
 use crate::node::transactions::transaction_pool::TransactionPool;
 use crate::node::{metric, signature_keys};
@@ -261,7 +262,7 @@ impl Block {
             None => {
                 info!("Genesis block does not exist, creating new one...");
                 let genesis_block = Self::new_genesis_block();
-                Self::add_block_to_chain(db, &genesis_block);
+                Self::add_block_to_chain(db, &genesis_block, 0);
             }
         }
     }
@@ -278,7 +279,7 @@ impl Block {
         }
     }
 
-    pub fn add_block_to_chain(db: &Database, block: &Block) {
+    pub fn add_block_to_chain(db: &Database, block: &Block, block_reward_amount: u64) {
         // Storage for keys and values
         let mut cf_storage: Vec<String> = Vec::new();
         let mut keys_storage: Vec<Vec<u8>> = Vec::new();
@@ -326,6 +327,18 @@ impl Block {
             // Prepare keys for deletion from tx_pool
             let tx_key = TransactionPool::construct_tx_pool_key(&tx.hash);
             tx_keys_to_delete.push(tx_key);
+        }
+
+        // Mint reward for non-genesis block author.
+        if block.index > 0 && block_reward_amount > 0 {
+            let (author_reward_key, author_reward_value) = AccountState::update_account_state_key(
+                &block.author,
+                block_reward_amount as i64,
+                db,
+            );
+            cf_storage.push("state".to_string());
+            keys_storage.push(author_reward_key);
+            values_storage.push(author_reward_value);
         }
 
         // Prepare operations for database write
