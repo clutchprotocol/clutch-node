@@ -112,6 +112,9 @@ impl WebSocket {
             "get_account_balance" => {
                 Self::handle_get_account_balance(params, id, blockchain).await
             }
+            "get_block_by_index" => {
+                Self::handle_get_block_by_index(params, id, blockchain).await
+            }
             "list_ride_requests" => {
                 Self::handle_list_ride_requests(params, id, blockchain).await
             }
@@ -320,6 +323,45 @@ impl WebSocket {
         let blockchain = blockchain.lock().await;
         let balance = blockchain.get_account_balance(&params.address);
         Some(json_rpc_success_response(serde_json::json!({ "balance": balance }), id))
+    }
+
+    async fn handle_get_block_by_index(
+        params: serde_json::Value,
+        id: serde_json::Value,
+        blockchain: &Arc<Mutex<Blockchain>>,
+    ) -> Option<String> {
+        #[derive(serde::Deserialize)]
+        struct GetBlockByIndexParams {
+            index: usize,
+        }
+
+        let params: GetBlockByIndexParams = match serde_json::from_value(params) {
+            Ok(p) => p,
+            Err(e) => {
+                let error_msg = format!("Invalid params: expected object with 'index' field: {}", e);
+                warn!("{}", error_msg);
+                return Some(json_rpc_error_response(-32602, &error_msg, id));
+            }
+        };
+
+        let blockchain = blockchain.lock().await;
+        match blockchain.get_blocks_by_indexes(vec![params.index]) {
+            Ok(blocks) => {
+                if let Some(block) = blocks.into_iter().next() {
+                    Some(json_rpc_success_response(
+                        serde_json::to_value(block).unwrap_or(serde_json::Value::Null),
+                        id,
+                    ))
+                } else {
+                    Some(json_rpc_error_response(-32004, "Block not found", id))
+                }
+            }
+            Err(e) => {
+                let error_msg = format!("Failed to get block by index {}: {}", params.index, e);
+                error!("{}", error_msg);
+                Some(json_rpc_error_response(-32000, &error_msg, id))
+            }
+        }
     }
 
     async fn handle_list_ride_requests(
