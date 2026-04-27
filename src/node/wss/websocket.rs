@@ -348,8 +348,26 @@ impl WebSocket {
         match blockchain.get_blocks_by_indexes(vec![params.index]) {
             Ok(blocks) => {
                 if let Some(block) = blocks.into_iter().next() {
+                    let block_reward = if block.index == 0 {
+                        0
+                    } else {
+                        blockchain.block_reward_amount()
+                    };
+                    let reward_recipient = block.author.clone();
+                    let mut block_value =
+                        serde_json::to_value(block).unwrap_or(serde_json::Value::Null);
+                    if let Some(obj) = block_value.as_object_mut() {
+                        obj.insert(
+                            "block_reward".to_string(),
+                            serde_json::Value::from(block_reward),
+                        );
+                        obj.insert(
+                            "reward_recipient".to_string(),
+                            serde_json::Value::from(reward_recipient),
+                        );
+                    }
                     Some(json_rpc_success_response(
-                        serde_json::to_value(block).unwrap_or(serde_json::Value::Null),
+                        block_value,
                         id,
                     ))
                 } else {

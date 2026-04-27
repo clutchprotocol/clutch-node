@@ -114,6 +114,10 @@ impl Blockchain {
         Block::get_blocks_by_indexes(&self.db, indexes)
     }
 
+    pub fn block_reward_amount(&self) -> u64 {
+        self.block_reward_amount
+    }
+
     #[allow(dead_code)]
     pub fn current_author(&self) -> &String {
         self.consensus.current_author()
