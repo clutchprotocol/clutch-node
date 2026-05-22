@@ -88,6 +88,7 @@ fn test_rlp_encode_ride_request_transaction() {
             longitude: 56.40913096554422,
         },
         fare: 1000,
+        referrer: None,
     };
     // Use nonce 1 for example
     let mut tx = Transaction::new_transaction(

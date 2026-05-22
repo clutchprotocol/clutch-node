@@ -262,7 +262,7 @@ impl Block {
             None => {
                 info!("Genesis block does not exist, creating new one...");
                 let genesis_block = Self::new_genesis_block();
-                Self::add_block_to_chain(db, &genesis_block, 0);
+                Self::add_block_to_chain(db, &genesis_block, 0, 0, 0);
             }
         }
     }
@@ -279,7 +279,13 @@ impl Block {
         }
     }
 
-    pub fn add_block_to_chain(db: &Database, block: &Block, block_reward_amount: u64) {
+    pub fn add_block_to_chain(
+        db: &Database,
+        block: &Block,
+        block_reward_amount: u64,
+        ride_request_referrer_fee_percent: u8,
+        ride_offer_referrer_fee_percent: u8,
+    ) {
         // Storage for keys and values
         let mut cf_storage: Vec<String> = Vec::new();
         let mut keys_storage: Vec<Vec<u8>> = Vec::new();
@@ -314,7 +320,11 @@ impl Block {
 
         // Handle transactions State
         for tx in block.transactions.iter() {
-            let updates = tx.state_transaction(&db);
+            let updates = tx.state_transaction(
+                &db,
+                ride_request_referrer_fee_percent,
+                ride_offer_referrer_fee_percent,
+            );
 
             for update in updates {
                 if let Some((key, value)) = update {

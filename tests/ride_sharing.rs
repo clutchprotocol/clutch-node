@@ -164,6 +164,7 @@ fn ride_request_transcation(fare: u64, nonce: u64) -> Transaction {
             latitude: 26.649646426996483,
             longitude: 55.857706441083984,
         }, //Ghil,Hengam iceland,Iran
+        referrer: None,
     };
 
     let mut ride_request_transcation = Transaction::new_transaction(
@@ -185,6 +186,7 @@ fn ride_offer_transaction(fare: u64, nonce: u64) -> Transaction {
     let ride_offer = RideOffer {
         fare: fare,
         ride_request_transaction_hash: RIDE_REQUEST_TX_HASH.to_string(),
+        referrer: None,
     };
 
     let mut ride_offer_transaction = Transaction::new_transaction(

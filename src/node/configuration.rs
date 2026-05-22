@@ -17,6 +17,8 @@ pub struct AppConfig {
     pub bootstrap_nodes: Vec<String>,
     pub block_authoring_enabled: bool,
     pub block_reward_amount: u64,
+    pub ride_request_referrer_fee_percent: u8,
+    pub ride_offer_referrer_fee_percent: u8,
     pub sync_enabled: bool,
     pub serve_metric_enabled: bool,
     pub serve_metric_addr: String,

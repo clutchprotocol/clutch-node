@@ -23,6 +23,8 @@ pub struct Blockchain {
     author_public_key: String,
     author_secret_key: String,
     block_reward_amount: u64,
+    ride_request_referrer_fee_percent: u8,
+    ride_offer_referrer_fee_percent: u8,
 }
 
 impl Blockchain {
@@ -33,6 +35,8 @@ impl Blockchain {
         developer_mode: bool,
         authorities: Vec<String>,
         block_reward_amount: u64,
+        ride_request_referrer_fee_percent: u8,
+        ride_offer_referrer_fee_percent: u8,
     ) -> Blockchain {
         let db = Database::new_db(&name);
         let step_duration = 60 / authorities.len() as u64;
@@ -44,6 +48,8 @@ impl Blockchain {
             author_public_key,
             author_secret_key,
             block_reward_amount,
+            ride_request_referrer_fee_percent,
+            ride_offer_referrer_fee_percent,
         };
 
         Block::genesis_import_block(&blockchain.db);
@@ -92,7 +98,13 @@ impl Blockchain {
         self.consensus.verify_block_author(&block)?;
         block.validate_block(&self.db)?;
         Transaction::validate_transactions(&self.db, &block.transactions)?;
-        Block::add_block_to_chain(&self.db, block, self.block_reward_amount);
+        Block::add_block_to_chain(
+            &self.db,
+            block,
+            self.block_reward_amount,
+            self.ride_request_referrer_fee_percent,
+            self.ride_offer_referrer_fee_percent,
+        );
 
         Ok(())
     }
@@ -116,6 +128,14 @@ impl Blockchain {
 
     pub fn block_reward_amount(&self) -> u64 {
         self.block_reward_amount
+    }
+
+    pub fn ride_request_referrer_fee_percent(&self) -> u8 {
+        self.ride_request_referrer_fee_percent
+    }
+
+    pub fn ride_offer_referrer_fee_percent(&self) -> u8 {
+        self.ride_offer_referrer_fee_percent
     }
 
     #[allow(dead_code)]

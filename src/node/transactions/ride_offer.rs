@@ -8,6 +8,8 @@ use tracing::error;
 pub struct RideOffer {
     pub ride_request_transaction_hash: String,
     pub fare: u64,
+    #[serde(default)]
+    pub referrer: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -16,6 +18,7 @@ pub struct AvailableRideOffer {
     pub ride_request_tx_hash: String,
     pub fare: u64,
     pub driver_address: String,
+    pub referrer: Option<String>,
 }
 
 impl RideOffer {
@@ -159,6 +162,7 @@ impl RideOffer {
                 ride_request_tx_hash: ride_offer.ride_request_transaction_hash,
                 fare: ride_offer.fare,
                 driver_address,
+                referrer: ride_offer.referrer,
             });
         }
 
@@ -180,19 +184,20 @@ impl RideOffer {
 
 impl Encodable for RideOffer {
     fn rlp_append(&self, stream: &mut RlpStream) {
-        // Begin an RLP list with two elements: ride_request_transaction_hash and fare
-        stream.begin_list(2);
+        // Begin an RLP list with three elements: ride_request_transaction_hash, fare, referrer (empty if none)
+        stream.begin_list(3);
         // Append the ride_request_transaction_hash field
         stream.append(&self.ride_request_transaction_hash);
         // Append the fare field
         stream.append(&self.fare);
+        stream.append(&self.referrer.clone().unwrap_or_default());
     }
 }
 
 impl Decodable for RideOffer {
     fn decode(rlp: &Rlp) -> Result<Self, DecoderError> {
-        // Ensure the RLP data is a list of exactly two items
-        if !rlp.is_list() || rlp.item_count()? != 2 {
+        // Ensure the RLP data is a list of exactly three items
+        if !rlp.is_list() || rlp.item_count()? != 3 {
             return Err(DecoderError::RlpIncorrectListLen);
         }
 
@@ -201,6 +206,10 @@ impl Decodable for RideOffer {
             ride_request_transaction_hash: rlp.val_at(0)?,
             // Extract the fare field from the second element
             fare: rlp.val_at(1)?,
+            referrer: {
+                let s: String = rlp.val_at(2)?;
+                if s.is_empty() { None } else { Some(s) }
+            },
         })
     }
 }

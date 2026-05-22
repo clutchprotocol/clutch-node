@@ -87,6 +87,8 @@ impl RidePay {
         &self,        
         tx_hash :&String,
         db: &Database,
+        request_fee_percent: u8,
+        offer_fee_percent: u8,
     ) -> Vec<Option<(Vec<u8>, Vec<u8>)>> {
 
         let ride_acceptance_tx_hash = &self.ride_acceptance_transaction_hash;
@@ -105,9 +107,16 @@ impl RidePay {
             .unwrap()
             .unwrap();
 
-        let transfer_value: i64 = self.fare as i64;
-        let (driver_account_state_key, driver_account_state_value) =
-            AccountState::update_account_state_key(&driver, transfer_value, db);
+        let ride_offer = RideOffer::get_ride_offer(ride_offer_tx_hash, db)
+            .unwrap()
+            .unwrap();
+        let ride_request_tx_hash = &ride_offer.ride_request_transaction_hash;
+        let ride_request = RideRequest::get_ride_request(ride_request_tx_hash, db)
+            .unwrap()
+            .unwrap();
+
+        let request_referrer = ride_request.referrer;
+        let offer_referrer = ride_offer.referrer;
 
         let fare_paid = match RideAcceptance::get_fare_paid(&ride_acceptance_tx_hash, db) {
             Ok(Some(fare)) => fare,
@@ -126,11 +135,36 @@ impl RidePay {
             RideAcceptance::construct_ride_acceptance_fare_paid_key(&ride_acceptance_tx_hash);
         let fare_paid_value = serde_json::to_string(&total_fare).unwrap().into_bytes();
 
-        vec![
+        let mut updates: Vec<Option<(Vec<u8>, Vec<u8>)>> = vec![
             Some((ride_pay_key, ride_pay_value)),
-            Some((driver_account_state_key, driver_account_state_value)),
             Some((fare_paid_key, fare_paid_value)),
-        ]
+        ];
+
+        let mut total_deducted: u64 = 0;
+
+        if let Some(ref req_ref) = request_referrer {
+            let fee = (request_fee_percent as u64 * self.fare) / 100;
+            if fee > 0 {
+                let (k, v) = AccountState::update_account_state_key(req_ref, fee as i64, db);
+                updates.push(Some((k, v)));
+                total_deducted += fee;
+            }
+        }
+
+        if let Some(ref off_ref) = offer_referrer {
+            let fee = (offer_fee_percent as u64 * self.fare) / 100;
+            if fee > 0 {
+                let (k, v) = AccountState::update_account_state_key(off_ref, fee as i64, db);
+                updates.push(Some((k, v)));
+                total_deducted += fee;
+            }
+        }
+
+        let driver_amount = self.fare - total_deducted;
+        let (driver_k, driver_v) = AccountState::update_account_state_key(&driver, driver_amount as i64, db);
+        updates.push(Some((driver_k, driver_v)));
+
+        updates
     }
 
     pub fn construct_ride_pay_key(tx_hash: &str) -> Vec<u8> {

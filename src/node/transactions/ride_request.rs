@@ -11,6 +11,8 @@ pub struct RideRequest {
     pub pickup_location: Coordinates,
     pub dropoff_location: Coordinates,
     pub fare: u64,
+    #[serde(default)]
+    pub referrer: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -20,6 +22,7 @@ pub struct AvailableRideRequest {
     pub dropoff_location: Coordinates,
     pub fare: u64,
     pub passenger_address: String,
+    pub referrer: Option<String>,
 }
 
 /// Map viewport bounds for filtering ride requests by pickup location.
@@ -188,6 +191,7 @@ impl RideRequest {
                 dropoff_location: ride_request.dropoff_location,
                 fare: ride_request.fare,
                 passenger_address,
+                referrer: ride_request.referrer,
             });
         }
 
@@ -213,17 +217,18 @@ impl RideRequest {
 
 impl Encodable for RideRequest {
     fn rlp_append(&self, stream: &mut RlpStream) {
-        // Begin an RLP list with three elements: pickup_location, dropoff_location, and fare
-        stream.begin_list(3);
+        // Begin an RLP list with four elements: pickup_location, dropoff_location, fare, referrer (empty string if none)
+        stream.begin_list(4);
         stream.append(&self.pickup_location);
         stream.append(&self.dropoff_location);
         stream.append(&self.fare);
+        stream.append(&self.referrer.clone().unwrap_or_default());
     }
 }
 
 impl Decodable for RideRequest {
     fn decode(rlp: &Rlp) -> Result<Self, DecoderError> {
-        if !rlp.is_list() || rlp.item_count()? != 3 {
+        if !rlp.is_list() || rlp.item_count()? != 4 {
             return Err(DecoderError::RlpIncorrectListLen);
         }
         
@@ -231,6 +236,10 @@ impl Decodable for RideRequest {
             pickup_location: rlp.val_at(0)?,
             dropoff_location: rlp.val_at(1)?,
             fare: rlp.val_at(2)?,
+            referrer: {
+                let s: String = rlp.val_at(3)?;
+                if s.is_empty() { None } else { Some(s) }
+            },
         })
     }
 }

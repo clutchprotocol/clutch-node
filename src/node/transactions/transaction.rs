@@ -167,7 +167,12 @@ impl Transaction {
         }
     }
 
-    pub fn state_transaction(&self, db: &Database) -> Vec<Option<(Vec<u8>, Vec<u8>)>> {
+    pub fn state_transaction(
+        &self,
+        db: &Database,
+        ride_request_referrer_fee_percent: u8,
+        ride_offer_referrer_fee_percent: u8,
+    ) -> Vec<Option<(Vec<u8>, Vec<u8>)>> {
         let mut states = match &self.data {
             FunctionCall::Transfer(transfer) => transfer.state_transaction(&self.from, db),
             FunctionCall::RideRequest(ride_request) => {
@@ -179,7 +184,12 @@ impl Transaction {
             FunctionCall::RideAcceptance(ride_acceptance) => {
                 ride_acceptance.state_transaction(&self.from, &self.hash, db)
             }
-            FunctionCall::RidePay(ride_pay) => ride_pay.state_transaction(&self.hash, db),
+            FunctionCall::RidePay(ride_pay) => ride_pay.state_transaction(
+                &self.hash,
+                db,
+                ride_request_referrer_fee_percent,
+                ride_offer_referrer_fee_percent,
+            ),
             FunctionCall::RideCancel(ride_cancel) => ride_cancel.state_transaction(&self.hash, db),
             FunctionCall::RideRequestCancel(ride_request_cancel) => {
                 ride_request_cancel.state_transaction(&self.hash, db)

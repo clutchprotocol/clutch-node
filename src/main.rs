@@ -46,5 +46,7 @@ fn initialize_blockchain(config: &AppConfig) -> Blockchain {
         config.developer_mode.clone(),
         config.authorities.clone(),
         config.block_reward_amount,
+        config.ride_request_referrer_fee_percent,
+        config.ride_offer_referrer_fee_percent,
     )
 }
