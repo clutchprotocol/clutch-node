@@ -206,10 +206,7 @@ impl Decodable for RideOffer {
             ride_request_transaction_hash: rlp.val_at(0)?,
             // Extract the fare field from the second element
             fare: rlp.val_at(1)?,
-            referrer: {
-                let s: String = rlp.val_at(2)?;
-                if s.is_empty() { None } else { Some(s) }
-            },
+            referrer: super::address::optional_canonical_referrer(rlp.val_at(2)?),
         })
     }
 }

@@ -236,10 +236,7 @@ impl Decodable for RideRequest {
             pickup_location: rlp.val_at(0)?,
             dropoff_location: rlp.val_at(1)?,
             fare: rlp.val_at(2)?,
-            referrer: {
-                let s: String = rlp.val_at(3)?;
-                if s.is_empty() { None } else { Some(s) }
-            },
+            referrer: super::address::optional_canonical_referrer(rlp.val_at(3)?),
         })
     }
 }

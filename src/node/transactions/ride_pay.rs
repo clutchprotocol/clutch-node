@@ -1,12 +1,23 @@
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use tracing::error;
 
 use crate::node::{account_state::AccountState, database::Database};
 
 use super::{
-    ride_acceptance::RideAcceptance, ride_offer::RideOffer, ride_request::RideRequest,
+    address::canonical_account_address,
+    ride_acceptance::RideAcceptance,
+    ride_offer::RideOffer,
+    ride_request::RideRequest,
 };
+
+fn referrer_fee_ceiling(percent: u8, fare: u64) -> u64 {
+    if percent == 0 || fare == 0 {
+        return 0;
+    }
+    (percent as u64 * fare + 99) / 100
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RidePay {
@@ -140,24 +151,31 @@ impl RidePay {
             Some((fare_paid_key, fare_paid_value)),
         ];
 
-        let mut total_deducted: u64 = 0;
+        let mut referrer_fees: HashMap<String, u64> = HashMap::new();
 
         if let Some(ref req_ref) = request_referrer {
-            let fee = (request_fee_percent as u64 * self.fare) / 100;
+            let fee = referrer_fee_ceiling(request_fee_percent, self.fare);
             if fee > 0 {
-                let (k, v) = AccountState::update_account_state_key(req_ref, fee as i64, db);
-                updates.push(Some((k, v)));
-                total_deducted += fee;
+                let canonical = canonical_account_address(req_ref);
+                *referrer_fees.entry(canonical).or_insert(0) += fee;
             }
         }
 
         if let Some(ref off_ref) = offer_referrer {
-            let fee = (offer_fee_percent as u64 * self.fare) / 100;
+            let fee = referrer_fee_ceiling(offer_fee_percent, self.fare);
             if fee > 0 {
-                let (k, v) = AccountState::update_account_state_key(off_ref, fee as i64, db);
-                updates.push(Some((k, v)));
-                total_deducted += fee;
+                let canonical = canonical_account_address(off_ref);
+                *referrer_fees.entry(canonical).or_insert(0) += fee;
             }
+        }
+
+        let mut total_deducted: u64 = 0;
+        for (referrer, fee) in referrer_fees {
+            let referrer_key = referrer.clone();
+            let (k, v) =
+                AccountState::update_account_state_key(&referrer_key, fee as i64, db);
+            updates.push(Some((k, v)));
+            total_deducted += fee;
         }
 
         let driver_amount = self.fare - total_deducted;
