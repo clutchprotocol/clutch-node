@@ -7,9 +7,30 @@
 
 > ⚠️ **ALPHA SOFTWARE** - This project is in active development and is considered experimental. Use at your own risk. APIs may change without notice.
 
-Clutch-Node is a blockchain-based ridesharing platform that aims to improve urban mobility by leveraging blockchain technology to create a decentralized, efficient, and secure system for ridesharing.
+Clutch Node is the blockchain core for Clutch Protocol — Aura consensus, custom RLP transactions, and WebSocket JSON-RPC.
+
+**Documentation:** https://docs.clutchprotocol.io/clutch-node/overview
 
 **Created and maintained by [Mehran Mazhar](https://github.com/MehranMazhar)**
+
+## Transaction types
+
+| Tag | Type | Description |
+|-----|------|-------------|
+| 0 | Transfer | CLT transfer |
+| 1 | RideRequest | Passenger requests a ride |
+| 2 | RideOffer | Driver offer |
+| 3 | RideAcceptance | Passenger accepts offer |
+| 4 | RidePay | Payment (partial OK) |
+| 5 | RideCancel | Cancel active trip |
+| 6–7 | Confirm/Complain Arrival | Stubs (not in Hub/SDK yet) |
+| 8 | RideRequestCancel | Cancel pending request |
+
+## JSON-RPC (WebSocket)
+
+`send_raw_transaction`, `get_next_nonce`, `get_account_balance`, `list_ride_requests`, `list_ride_offers`, `list_active_trips`, `list_completed_trips`, `list_recent_trips`, `get_block_by_index`
+
+Apps typically use [clutch-hub-api](https://github.com/clutchprotocol/clutch-hub-api) instead of calling the node directly.
 
 ## Features
 - **Decentralized System**: Eliminates intermediaries, allowing users to connect directly.
