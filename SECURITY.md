@@ -72,7 +72,7 @@ Please include the following in your report:
 - **Blockchain Core**: Consensus, validation, networking
 - **Cryptographic Functions**: Signing, hashing, key management
 - **API Security**: Authentication, authorization, input validation
-- **Smart Contract Logic**: Transaction processing, fee distribution
+- **Smart Contract Logic**: Transaction processing, referrer fee routing, and block rewards
 - **Network Protocol**: P2P communication, message handling
 
 ### Out of Scope

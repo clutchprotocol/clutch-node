@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Aura consensus mechanism implementation
 - P2P networking layer for node communication
 - Transaction validation and processing system
-- Fee distribution mechanism (90% drivers, 5% nodes, 5% developers)
+- Referrer fees on RidePay (default 2% request + 2% offer) and fixed validator block rewards
 - Docker containerization support
 - Basic API endpoints for blockchain interaction
 - Comprehensive documentation and examples
@@ -48,7 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Transaction System**
   - Ride request transactions
-  - Fee calculation and distribution
+  - Referrer fee routing on RidePay and block rewards
   - Digital signature verification
   - Nonce-based ordering
 
@@ -119,7 +119,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Week 7-10: Integration (📋 Planned)
 - [ ] API layer development
-- [ ] Fee distribution system
 - [ ] Demo application integration
 - [ ] End-to-end testing
 

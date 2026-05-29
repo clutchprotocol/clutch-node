@@ -24,9 +24,9 @@ This directory contains practical examples demonstrating how to use and interact
 - **Description:** P2P networking and message handling
 - **Difficulty:** Intermediate
 
-### 5. Fee Distribution
-- **File:** `fee_distribution.rs`
-- **Description:** Understanding the fee distribution mechanism (90% drivers, 5% nodes, 5% developers)
+### 5. CLT Economics
+- **Docs:** [CLT Economics](https://docs.clutchprotocol.io/clutch-node/clt-economics)
+- **Description:** Referrer fees on RidePay (default 2%+2%) and fixed block rewards for validators
 - **Difficulty:** Intermediate
 
 ## 🚀 Running Examples

@@ -141,6 +141,15 @@ block_reward_amount = 50
 - The full reward (`100%`) is credited to the block author account (`block.author`).
 - Genesis block does not mint any author reward.
 
+## CLT Economics
+
+Ride payments and validator rewards are separate:
+
+- **RidePay** — referrer fees (default 2% request + 2% offer per installment); driver receives the remainder
+- **Blocks** — `block_reward_amount` (default 50 CLT) minted to the block author each non-genesis block
+
+Full details: [docs.clutchprotocol.io/clutch-node/clt-economics](https://docs.clutchprotocol.io/clutch-node/clt-economics)
+
 ## Installing Clang on Windows
 Set the `LIBCLANG_PATH` environment variable:
 ```bash
