@@ -112,6 +112,9 @@ impl WebSocket {
             "get_account_balance" => {
                 Self::handle_get_account_balance(params, id, blockchain).await
             }
+            "get_account_balance_effects" => {
+                Self::handle_get_account_balance_effects(params, id, blockchain).await
+            }
             "get_block_by_index" => {
                 Self::handle_get_block_by_index(params, id, blockchain).await
             }
@@ -325,6 +328,48 @@ impl WebSocket {
         Some(json_rpc_success_response(serde_json::json!({ "balance": balance }), id))
     }
 
+    async fn handle_get_account_balance_effects(
+        params: serde_json::Value,
+        id: serde_json::Value,
+        blockchain: &Arc<Mutex<Blockchain>>,
+    ) -> Option<String> {
+        #[derive(serde::Deserialize)]
+        struct GetAccountBalanceEffectsParams {
+            address: String,
+            #[serde(default = "default_limit")]
+            limit: usize,
+            #[serde(default)]
+            offset: usize,
+        }
+
+        fn default_limit() -> usize {
+            20
+        }
+
+        let params: GetAccountBalanceEffectsParams = match serde_json::from_value(params) {
+            Ok(p) => p,
+            Err(e) => {
+                let error_msg = format!(
+                    "Invalid params: expected object with 'address' field: {}",
+                    e
+                );
+                warn!("{}", error_msg);
+                return Some(json_rpc_error_response(-32602, &error_msg, id));
+            }
+        };
+
+        let blockchain = blockchain.lock().await;
+        let effects = blockchain.get_account_balance_effects(
+            &params.address,
+            params.limit,
+            params.offset,
+        );
+        Some(json_rpc_success_response(
+            serde_json::json!({ "items": effects }),
+            id,
+        ))
+    }
+
     async fn handle_get_block_by_index(
         params: serde_json::Value,
         id: serde_json::Value,
@@ -355,7 +400,7 @@ impl WebSocket {
                     };
                     let reward_recipient = block.author.clone();
                     let mut block_value =
-                        serde_json::to_value(block).unwrap_or(serde_json::Value::Null);
+                        serde_json::to_value(&block).unwrap_or(serde_json::Value::Null);
                     if let Some(obj) = block_value.as_object_mut() {
                         obj.insert(
                             "block_reward".to_string(),
@@ -365,6 +410,40 @@ impl WebSocket {
                             "reward_recipient".to_string(),
                             serde_json::Value::from(reward_recipient),
                         );
+
+                        let block_effects =
+                            blockchain.get_block_balance_effects(block.index as u64);
+                        if !block_effects.is_empty() {
+                            obj.insert(
+                                "balance_effects".to_string(),
+                                serde_json::to_value(&block_effects)
+                                    .unwrap_or(serde_json::Value::Array(vec![])),
+                            );
+                        }
+
+                        if let Some(txs) = obj.get_mut("transactions").and_then(|v| v.as_array_mut())
+                        {
+                            for (idx, tx_val) in txs.iter_mut().enumerate() {
+                                if let Some(tx_obj) = tx_val.as_object_mut() {
+                                    let tx_hash = tx_obj
+                                        .get("hash")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    if !tx_hash.is_empty() {
+                                        let effects =
+                                            blockchain.get_tx_balance_effects(tx_hash);
+                                        if !effects.is_empty() {
+                                            tx_obj.insert(
+                                                "balance_effects".to_string(),
+                                                serde_json::to_value(&effects)
+                                                    .unwrap_or(serde_json::Value::Array(vec![])),
+                                            );
+                                        }
+                                    }
+                                    let _ = idx;
+                                }
+                            }
+                        }
                     }
                     Some(json_rpc_success_response(
                         block_value,

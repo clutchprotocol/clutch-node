@@ -7,6 +7,7 @@ use super::p2p_server::handshake::Handshake;
 use super::transactions::transaction_pool::TransactionPool;
 use crate::node::account_state::AccountState;
 use crate::node::aura::Aura;
+use crate::node::balance_effect::{get_account_balance_effects, load_block_effects, load_tx_effects, StoredBalanceEffect};
 use crate::node::database::Database;
 use crate::node::file_utils::write_to_file;
 use crate::node::node_services::NodeServices;
@@ -71,6 +72,23 @@ impl Blockchain {
 
     pub fn get_account_balance(&self, public_key: &String) -> u64 {
         self.get_account_state(public_key).balance
+    }
+
+    pub fn get_tx_balance_effects(&self, tx_hash: &str) -> Vec<StoredBalanceEffect> {
+        load_tx_effects(&self.db, tx_hash)
+    }
+
+    pub fn get_block_balance_effects(&self, block_height: u64) -> Vec<StoredBalanceEffect> {
+        load_block_effects(&self.db, block_height)
+    }
+
+    pub fn get_account_balance_effects(
+        &self,
+        address: &str,
+        limit: usize,
+        offset: usize,
+    ) -> Vec<StoredBalanceEffect> {
+        get_account_balance_effects(&self.db, address, limit, offset)
     }
 
     pub fn get_current_nonce(&self, public_key: &String) -> Result<u64, String> {

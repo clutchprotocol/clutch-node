@@ -1,5 +1,6 @@
 use crate::node::{
     account_state::AccountState,
+    balance_effect::{BalanceEffectKind, StateUpdate},
     database::Database,
     transactions::address::normalize_address_for_compare,
     transactions::ride_offer::RideOffer,
@@ -128,7 +129,7 @@ impl RideAcceptance {
         from: &String,
         tx_hash: &String,
         db: &Database,
-    ) -> Vec<Option<(Vec<u8>, Vec<u8>)>> {
+    ) -> Vec<StateUpdate> {
         let ride_acceptance_tx_hash = &tx_hash;
         let ride_offer_tx_hash = &self.ride_offer_transaction_hash;
         let ride_request_tx_hash = &RideOffer::get_ride_offer(&ride_offer_tx_hash, db)
@@ -155,14 +156,19 @@ impl RideAcceptance {
             .unwrap();
 
         let transfer_value: i64 = ride_offer.fare as i64;
-        let (passenger_account_state_key, passenger_account_state_value) =
-            AccountState::update_account_state_key(&from, -transfer_value, db);
+        let passenger_update = AccountState::apply_balance_change(
+            from,
+            -transfer_value,
+            BalanceEffectKind::RideAcceptanceDebit,
+            None,
+            db,
+        );
 
         vec![
-            Some((ride_acceptance_key, ride_acceptance_value)), //ride_acceptance_{}
-            Some((ride_request_acceptance_key, ride_request_acceptance_value)), //ride_request_{}:ride_acceptance
-            Some((ride_offer_acceptance_key, ride_offer_acceptance_value)), //"ride_offer_{}:ride_acceptance
-            Some((passenger_account_state_key, passenger_account_state_value)),
+            StateUpdate::storage_only(ride_acceptance_key, ride_acceptance_value),
+            StateUpdate::storage_only(ride_request_acceptance_key, ride_request_acceptance_value),
+            StateUpdate::storage_only(ride_offer_acceptance_key, ride_offer_acceptance_value),
+            passenger_update,
         ]
     }
 

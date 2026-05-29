@@ -3,7 +3,9 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use tracing::error;
 
-use crate::node::{account_state::AccountState, database::Database};
+use crate::node::account_state::AccountState;
+use crate::node::balance_effect::{BalanceEffectKind, StateUpdate};
+use crate::node::database::Database;
 
 use super::{
     address::canonical_account_address,
@@ -17,6 +19,12 @@ fn referrer_fee_ceiling(percent: u8, fare: u64) -> u64 {
         return 0;
     }
     (percent as u64 * fare + 99) / 100
+}
+
+#[derive(Default)]
+struct ReferrerFeeParts {
+    request: u64,
+    offer: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -95,17 +103,17 @@ impl RidePay {
     }
 
     pub fn state_transaction(
-        &self,        
-        tx_hash :&String,
+        &self,
+        tx_hash: &String,
         db: &Database,
         request_fee_percent: u8,
         offer_fee_percent: u8,
-    ) -> Vec<Option<(Vec<u8>, Vec<u8>)>> {
-
+        passenger: &String,
+    ) -> Vec<StateUpdate> {
         let ride_acceptance_tx_hash = &self.ride_acceptance_transaction_hash;
 
-        let ride_pay_key = Self::construct_ride_pay_key(&tx_hash);
-        let ride_pay_value = serde_json::to_string(&self)
+        let ride_pay_key = Self::construct_ride_pay_key(tx_hash);
+        let ride_pay_value = serde_json::to_string(self)
             .expect("Failed to serialize RidePay.")
             .into_bytes();
 
@@ -129,13 +137,13 @@ impl RidePay {
         let request_referrer = ride_request.referrer;
         let offer_referrer = ride_offer.referrer;
 
-        let fare_paid = match RideAcceptance::get_fare_paid(&ride_acceptance_tx_hash, db) {
+        let fare_paid = match RideAcceptance::get_fare_paid(ride_acceptance_tx_hash, db) {
             Ok(Some(fare)) => fare,
             Ok(None) => 0,
             Err(_) => {
                 error!(
                     "Failed to retrieve 'fare_paid' field for ride acceptace with transaction hash '{}'.",
-                    &ride_acceptance_tx_hash
+                    ride_acceptance_tx_hash
                 );
                 0
             }
@@ -143,21 +151,21 @@ impl RidePay {
 
         let total_fare = (fare_paid as u64) + self.fare;
         let fare_paid_key =
-            RideAcceptance::construct_ride_acceptance_fare_paid_key(&ride_acceptance_tx_hash);
+            RideAcceptance::construct_ride_acceptance_fare_paid_key(ride_acceptance_tx_hash);
         let fare_paid_value = serde_json::to_string(&total_fare).unwrap().into_bytes();
 
-        let mut updates: Vec<Option<(Vec<u8>, Vec<u8>)>> = vec![
-            Some((ride_pay_key, ride_pay_value)),
-            Some((fare_paid_key, fare_paid_value)),
+        let mut updates: Vec<StateUpdate> = vec![
+            StateUpdate::storage_only(ride_pay_key, ride_pay_value),
+            StateUpdate::storage_only(fare_paid_key, fare_paid_value),
         ];
 
-        let mut referrer_fees: HashMap<String, u64> = HashMap::new();
+        let mut referrer_fees: HashMap<String, ReferrerFeeParts> = HashMap::new();
 
         if let Some(ref req_ref) = request_referrer {
             let fee = referrer_fee_ceiling(request_fee_percent, self.fare);
             if fee > 0 {
                 let canonical = canonical_account_address(req_ref);
-                *referrer_fees.entry(canonical).or_insert(0) += fee;
+                referrer_fees.entry(canonical).or_default().request += fee;
             }
         }
 
@@ -165,22 +173,44 @@ impl RidePay {
             let fee = referrer_fee_ceiling(offer_fee_percent, self.fare);
             if fee > 0 {
                 let canonical = canonical_account_address(off_ref);
-                *referrer_fees.entry(canonical).or_insert(0) += fee;
+                referrer_fees.entry(canonical).or_default().offer += fee;
             }
         }
 
+        let passenger_cp = Some(passenger.clone());
         let mut total_deducted: u64 = 0;
-        for (referrer, fee) in referrer_fees {
-            let referrer_key = referrer.clone();
-            let (k, v) =
-                AccountState::update_account_state_key(&referrer_key, fee as i64, db);
-            updates.push(Some((k, v)));
-            total_deducted += fee;
+
+        for (referrer, parts) in referrer_fees {
+            if parts.request > 0 {
+                updates.push(AccountState::apply_balance_change(
+                    &referrer,
+                    parts.request as i64,
+                    BalanceEffectKind::ReferrerRequestFee,
+                    passenger_cp.clone(),
+                    db,
+                ));
+                total_deducted += parts.request;
+            }
+            if parts.offer > 0 {
+                updates.push(AccountState::apply_balance_change(
+                    &referrer,
+                    parts.offer as i64,
+                    BalanceEffectKind::ReferrerOfferFee,
+                    passenger_cp.clone(),
+                    db,
+                ));
+                total_deducted += parts.offer;
+            }
         }
 
         let driver_amount = self.fare - total_deducted;
-        let (driver_k, driver_v) = AccountState::update_account_state_key(&driver, driver_amount as i64, db);
-        updates.push(Some((driver_k, driver_v)));
+        updates.push(AccountState::apply_balance_change(
+            &driver,
+            driver_amount as i64,
+            BalanceEffectKind::RidePayDriverCredit,
+            passenger_cp,
+            db,
+        ));
 
         updates
     }

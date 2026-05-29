@@ -1,6 +1,7 @@
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 use serde::{Deserialize, Serialize};
 
+use crate::node::balance_effect::StateUpdate;
 use crate::node::database::Database;
 
 
@@ -17,8 +18,8 @@ impl ComplainArrival {
     pub fn state_transaction(
         &self,       
         _db: &Database,
-    ) -> Vec<Option<(Vec<u8>, Vec<u8>)>> {
-        vec![None]
+    ) -> Vec<StateUpdate> {
+        vec![]
     }
 }
 

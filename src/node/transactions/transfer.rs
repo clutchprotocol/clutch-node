@@ -1,4 +1,5 @@
 use crate::node::account_state::AccountState;
+use crate::node::balance_effect::{BalanceEffectKind, StateUpdate};
 use crate::node::database::Database;
 
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
@@ -24,24 +25,25 @@ impl Transfer {
         Ok(())
     }
 
-    pub fn state_transaction(
-        &self,
-        from: &String,
-        db: &Database,
-    ) -> Vec<Option<(Vec<u8>, Vec<u8>)>> {
+    pub fn state_transaction(&self, from: &String, db: &Database) -> Vec<StateUpdate> {
         let transfer_value: i64 = self.value as i64;
-
-        // Update sender's account state by deducting the transfer value
-        let (from_account_state_key, from_account_state_value) =
-            AccountState::update_account_state_key(from, -transfer_value, db);
-
-        // Update recipient's account state by adding the transfer value
-        let (to_account_state_key, to_account_state_value) =
-            AccountState::update_account_state_key(&self.to, transfer_value, db);
+        let to = self.to.clone();
 
         vec![
-            Some((from_account_state_key, from_account_state_value)),
-            Some((to_account_state_key, to_account_state_value)),
+            AccountState::apply_balance_change(
+                from,
+                -transfer_value,
+                BalanceEffectKind::TransferOut,
+                Some(to.clone()),
+                db,
+            ),
+            AccountState::apply_balance_change(
+                &to,
+                transfer_value,
+                BalanceEffectKind::TransferIn,
+                Some(from.clone()),
+                db,
+            ),
         ]
     }
 }
@@ -59,7 +61,7 @@ impl Decodable for Transfer {
         if !rlp.is_list() || rlp.item_count()? != 2 {
             return Err(DecoderError::RlpIncorrectListLen);
         }
-        
+
         Ok(Transfer {
             to: rlp.val_at(0)?,
             value: rlp.val_at(1)?,

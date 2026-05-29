@@ -1,3 +1,4 @@
+use crate::node::balance_effect::{BalanceEffect, BalanceEffectKind, StateUpdate};
 use crate::node::database::Database;
 use crate::node::transactions::address::{
     canonical_account_address, legacy_account_address_hex,
@@ -71,6 +72,30 @@ impl AccountState {
             .unwrap()
             .into_bytes();
         (key, serialized)
+    }
+
+    pub fn apply_balance_change(
+        public_key: &String,
+        balance_change: i64,
+        kind: BalanceEffectKind,
+        counterparty: Option<String>,
+        db: &Database,
+    ) -> StateUpdate {
+        if balance_change == 0 {
+            return StateUpdate::default();
+        }
+
+        let canonical = canonical_account_address(public_key);
+        let (key, value) = Self::update_account_state_key(public_key, balance_change, db);
+        StateUpdate {
+            storage: Some((key, value)),
+            effect: Some(BalanceEffect {
+                address: canonical,
+                delta: balance_change,
+                kind,
+                counterparty,
+            }),
+        }
     }
 
     fn load_nonce(canonical: &str, db: &Database) -> Option<u64> {

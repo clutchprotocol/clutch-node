@@ -5,6 +5,9 @@ use tracing::{error, info, warn};
 use crate::node::database::Database;
 use crate::node::time_utils::get_current_timespan;
 use crate::node::account_state::AccountState;
+use crate::node::balance_effect::{
+    persist_block_effects, persist_tx_effects, BalanceEffectKind, StateUpdate,
+};
 use crate::node::transactions::transaction::Transaction;
 use crate::node::transactions::transaction_pool::TransactionPool;
 use crate::node::{metric, signature_keys};
@@ -319,15 +322,34 @@ impl Block {
         }
 
         // Handle transactions State
-        for tx in block.transactions.iter() {
+        for (tx_index, tx) in block.transactions.iter().enumerate() {
             let updates = tx.state_transaction(
                 &db,
                 ride_request_referrer_fee_percent,
                 ride_offer_referrer_fee_percent,
             );
 
+            let mut tx_effects = Vec::new();
             for update in updates {
-                if let Some((key, value)) = update {
+                if let Some((key, value)) = update.storage {
+                    cf_storage.push("state".to_string());
+                    keys_storage.push(key);
+                    values_storage.push(value);
+                }
+                if let Some(effect) = update.effect {
+                    tx_effects.push(effect);
+                }
+            }
+
+            if !tx_effects.is_empty() {
+                for (key, value) in persist_tx_effects(
+                    &tx.hash,
+                    block.index as u64,
+                    tx_index as u32,
+                    block.timestamp,
+                    tx.function_call_type(),
+                    &tx_effects,
+                ) {
                     cf_storage.push("state".to_string());
                     keys_storage.push(key);
                     values_storage.push(value);
@@ -341,14 +363,29 @@ impl Block {
 
         // Mint reward for non-genesis block author.
         if block.index > 0 && block_reward_amount > 0 {
-            let (author_reward_key, author_reward_value) = AccountState::update_account_state_key(
+            let reward_update = AccountState::apply_balance_change(
                 &block.author,
                 block_reward_amount as i64,
-                db,
+                BalanceEffectKind::BlockReward,
+                None,
+                &db,
             );
-            cf_storage.push("state".to_string());
-            keys_storage.push(author_reward_key);
-            values_storage.push(author_reward_value);
+            if let Some((author_reward_key, author_reward_value)) = reward_update.storage {
+                cf_storage.push("state".to_string());
+                keys_storage.push(author_reward_key);
+                values_storage.push(author_reward_value);
+            }
+            if let Some(effect) = reward_update.effect {
+                for (key, value) in persist_block_effects(
+                    block.index as u64,
+                    block.timestamp,
+                    std::slice::from_ref(&effect),
+                ) {
+                    cf_storage.push("state".to_string());
+                    keys_storage.push(key);
+                    values_storage.push(value);
+                }
+            }
         }
 
         // Prepare operations for database write

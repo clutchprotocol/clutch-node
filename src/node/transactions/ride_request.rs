@@ -1,5 +1,6 @@
 use super::tx_hash_pointer::decode_acceptance_pointer_value;
 use crate::node::account_state::AccountState;
+use crate::node::balance_effect::StateUpdate;
 use crate::node::coordinate::Coordinates;
 use crate::node::database::Database;
 
@@ -55,7 +56,7 @@ impl RideRequest {
         from: &String,
         tx_hash :&String,
         _db: &Database,
-    ) -> Vec<Option<(Vec<u8>, Vec<u8>)>> {
+    ) -> Vec<StateUpdate> {
 
         let ride_request_key = Self::construct_ride_request_key(tx_hash);
         let ride_request_value = serde_json::to_string(&self).unwrap().into_bytes();
@@ -64,8 +65,8 @@ impl RideRequest {
         let ride_request_from_value = from.clone().into_bytes();
 
         vec![
-            Some((ride_request_key, ride_request_value)),
-            Some((ride_request_from_key, ride_request_from_value)),
+            StateUpdate::storage_only(ride_request_key, ride_request_value),
+            StateUpdate::storage_only(ride_request_from_key, ride_request_from_value),
         ]
     }
 
@@ -153,10 +154,12 @@ impl RideRequest {
                 continue;
             }
 
-            let tx_hash = key_str
-                .strip_prefix(PREFIX)
-                .ok_or("Invalid ride request key")?
-                .to_string();
+            let Some(tx_hash) = key_str.strip_prefix(PREFIX) else {
+                continue;
+            };
+            if tx_hash.is_empty() {
+                continue;
+            }
 
             // Skip if already accepted
             if Self::get_ride_acceptance(&tx_hash, db)?.is_some() {
@@ -186,7 +189,7 @@ impl RideRequest {
                 .unwrap_or_else(|| String::new());
 
             result.push(AvailableRideRequest {
-                tx_hash,
+                tx_hash: tx_hash.to_string(),
                 pickup_location: ride_request.pickup_location,
                 dropoff_location: ride_request.dropoff_location,
                 fare: ride_request.fare,

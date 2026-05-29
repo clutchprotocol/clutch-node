@@ -108,6 +108,8 @@ fn new_blockchain() -> Blockchain {
         true,
         authorities,
         BLOCK_REWARD_AMOUNT,
+        2,
+        2,
     );
     blockchain
 }

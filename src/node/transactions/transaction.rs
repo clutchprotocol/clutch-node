@@ -1,5 +1,6 @@
 use crate::node::{
     account_state::AccountState,
+    balance_effect::StateUpdate,
     database::Database,
     signature_keys::{self, SignatureKeys},
 };
@@ -167,12 +168,26 @@ impl Transaction {
         }
     }
 
+    pub fn function_call_type(&self) -> &'static str {
+        match &self.data {
+            FunctionCall::Transfer(_) => "Transfer",
+            FunctionCall::RideRequest(_) => "RideRequest",
+            FunctionCall::RideOffer(_) => "RideOffer",
+            FunctionCall::RideAcceptance(_) => "RideAcceptance",
+            FunctionCall::RidePay(_) => "RidePay",
+            FunctionCall::RideCancel(_) => "RideCancel",
+            FunctionCall::RideRequestCancel(_) => "RideRequestCancel",
+            FunctionCall::ConfirmArrival(_) => "ConfirmArrival",
+            FunctionCall::ComplainArrival(_) => "ComplainArrival",
+        }
+    }
+
     pub fn state_transaction(
         &self,
         db: &Database,
         ride_request_referrer_fee_percent: u8,
         ride_offer_referrer_fee_percent: u8,
-    ) -> Vec<Option<(Vec<u8>, Vec<u8>)>> {
+    ) -> Vec<StateUpdate> {
         let mut states = match &self.data {
             FunctionCall::Transfer(transfer) => transfer.state_transaction(&self.from, db),
             FunctionCall::RideRequest(ride_request) => {
@@ -189,6 +204,7 @@ impl Transaction {
                 db,
                 ride_request_referrer_fee_percent,
                 ride_offer_referrer_fee_percent,
+                &self.from,
             ),
             FunctionCall::RideCancel(ride_cancel) => ride_cancel.state_transaction(&self.hash, db),
             FunctionCall::RideRequestCancel(ride_request_cancel) => {
@@ -202,11 +218,9 @@ impl Transaction {
 
         match AccountState::increase_account_nonce_key(&self.from, db) {
             Ok((nonce_key, nonce_serialized)) => {
-                states.push(Some((nonce_key, nonce_serialized)));
+                states.push(StateUpdate::storage_only(nonce_key, nonce_serialized));
             }
-            Err(_e) => {
-                states.push(None);
-            }
+            Err(_e) => {}
         }
 
         states

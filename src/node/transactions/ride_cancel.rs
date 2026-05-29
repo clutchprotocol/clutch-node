@@ -2,7 +2,11 @@ use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
-use crate::node::{account_state::AccountState, database::Database};
+use crate::node::{
+    account_state::AccountState,
+    balance_effect::{BalanceEffectKind, StateUpdate},
+    database::Database,
+};
 
 use super::{ride_acceptance::RideAcceptance, ride_offer::RideOffer, ride_request::RideRequest};
 
@@ -92,7 +96,7 @@ impl RideCancel {
         &self,
         tx_hash: &String,
         db: &Database,
-    ) -> Vec<Option<(Vec<u8>, Vec<u8>)>> {
+    ) -> Vec<StateUpdate> {
         let ride_cancel_key = Self::construct_ride_cancel_key(&tx_hash);
         let ride_cancel_value = serde_json::to_string(&self)
             .expect("Failed to serialize RidePay.")
@@ -131,13 +135,18 @@ impl RideCancel {
 
         let remaining_amount = (ride_offer.fare as i64) - (fare_paid as i64);
 
-        let (passenger_account_state_key, passenger_account_state_value) =
-            AccountState::update_account_state_key(&passenger, remaining_amount, db);
+        let passenger_update = AccountState::apply_balance_change(
+            &passenger,
+            remaining_amount,
+            BalanceEffectKind::RideCancelRefund,
+            None,
+            db,
+        );
 
         vec![
-            Some((ride_cancel_key, ride_cancel_value)),
-            Some((passenger_account_state_key, passenger_account_state_value)),
-            Some((ride_acceptance_cancel_key, ride_acceptance_cancel_value)),
+            StateUpdate::storage_only(ride_cancel_key, ride_cancel_value),
+            passenger_update,
+            StateUpdate::storage_only(ride_acceptance_cancel_key, ride_acceptance_cancel_value),
         ]
     }
 

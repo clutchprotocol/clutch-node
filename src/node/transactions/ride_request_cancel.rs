@@ -1,5 +1,6 @@
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 
+use crate::node::balance_effect::StateUpdate;
 use crate::node::database::Database;
 
 use super::ride_request::RideRequest;
@@ -61,13 +62,13 @@ impl RideRequestCancel {
         &self,
         cancel_tx_hash: &str,
         _db: &Database,
-    ) -> Vec<Option<(Vec<u8>, Vec<u8>)>> {
+    ) -> Vec<StateUpdate> {
         let ride_request_tx_hash = &self.ride_request_transaction_hash;
 
         let cancel_key = RideRequest::construct_ride_request_cancel_key(ride_request_tx_hash);
         let cancel_value = cancel_tx_hash.as_bytes().to_vec();
 
-        vec![Some((cancel_key, cancel_value))]
+        vec![StateUpdate::storage_only(cancel_key, cancel_value)]
     }
 }
 

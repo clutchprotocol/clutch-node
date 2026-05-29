@@ -25,6 +25,8 @@ fn transfer_founds() {
         true,
         authorities,
         BLOCK_REWARD_AMOUNT,
+        2,
+        2,
     );
 
     let blocks = [|| transfer_block(1, 1, 20)];

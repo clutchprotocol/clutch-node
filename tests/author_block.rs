@@ -21,6 +21,8 @@ fn author_block() {
         true,
         authorities,
         BLOCK_REWARD_AMOUNT,
+        2,
+        2,
     );
 
     let transfer_tx = transfer_transaction(1, 20);

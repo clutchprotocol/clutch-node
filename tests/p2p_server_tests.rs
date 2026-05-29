@@ -49,6 +49,8 @@ fn initialize_blockchain(name: String) -> Blockchain {
         true,
         vec!["0x9b6e8afff8329743cac73dbef83ca3cbf9a74c20".to_string()],
         50,
+        2,
+        2,
     )
 }
 

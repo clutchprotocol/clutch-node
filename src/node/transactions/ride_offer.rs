@@ -1,4 +1,5 @@
 use super::{ride_request::RideRequest, tx_hash_pointer::decode_acceptance_pointer_value};
+use crate::node::balance_effect::StateUpdate;
 use crate::node::database::Database;
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 use serde::{Deserialize, Serialize};
@@ -41,7 +42,7 @@ impl RideOffer {
         from: &String,
         tx_hash: &String,
         _db: &Database,
-    ) -> Vec<Option<(Vec<u8>, Vec<u8>)>> {
+    ) -> Vec<StateUpdate> {
         let ride_offer_key = Self::construct_ride_offer_key(tx_hash);
         let ride_offer_value = serde_json::to_string(&self).unwrap().into_bytes();
 
@@ -49,8 +50,8 @@ impl RideOffer {
         let ride_offer_from_value = from.clone().into_bytes();
 
         vec![
-            Some((ride_offer_key, ride_offer_value)),
-            Some((ride_offer_from_key, ride_offer_from_value)),
+            StateUpdate::storage_only(ride_offer_key, ride_offer_value),
+            StateUpdate::storage_only(ride_offer_from_key, ride_offer_from_value),
         ]
     }
 

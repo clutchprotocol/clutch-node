@@ -1,5 +1,6 @@
 pub mod account_state;
 pub mod aura;
+pub mod balance_effect;
 pub mod blocks;
 pub mod blockchain;
 pub mod configuration;
