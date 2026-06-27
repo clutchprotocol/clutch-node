@@ -11,8 +11,6 @@ use super::blocks::block_headers::{BlockHeader, BlockHeaders};
 use super::p2p_server::get_block_bodies::GetBlockBodies;
 use super::p2p_server::get_block_header::GetBlockHeaders;
 use super::p2p_server::handshake::Handshake;
-use super::transactions::complain_arrival::ComplainArrival;
-use super::transactions::confirm_arrival::ConfirmArrival;
 use super::transactions::function_call::FunctionCall;
 use super::transactions::ride_acceptance::RideAcceptance;
 use super::transactions::ride_cancel::RideCancel;
@@ -60,16 +58,6 @@ impl Encodable for FunctionCall {
                 stream.append(&8u8); // Tag for RideRequestCancel
                 stream.append(args);
             }
-            FunctionCall::ConfirmArrival(args) => {
-                stream.begin_list(2);
-                stream.append(&6u8); // Tag for ConfirmArrival
-                stream.append(args);
-            }
-            FunctionCall::ComplainArrival(args) => {
-                stream.begin_list(2);
-                stream.append(&7u8); // Tag for ComplainArrival
-                stream.append(args);
-            }
         }
     }
 }
@@ -110,14 +98,6 @@ impl Decodable for FunctionCall {
             8 => {
                 let args: RideRequestCancel = rlp.val_at(1)?;
                 Ok(FunctionCall::RideRequestCancel(args))
-            }
-            6 => {
-                let args: ConfirmArrival = rlp.val_at(1)?;
-                Ok(FunctionCall::ConfirmArrival(args))
-            }
-            7 => {
-                let args: ComplainArrival = rlp.val_at(1)?;
-                Ok(FunctionCall::ComplainArrival(args))
             }
             _ => Err(DecoderError::Custom("Unknown FunctionCall variant")),
         }

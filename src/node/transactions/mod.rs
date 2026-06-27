@@ -1,6 +1,4 @@
 pub mod address;
-pub mod complain_arrival;
-pub mod confirm_arrival;
 pub mod function_call;
 pub mod passenger_concurrent;
 pub mod ride_acceptance;

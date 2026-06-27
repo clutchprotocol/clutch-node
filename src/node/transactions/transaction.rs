@@ -163,8 +163,6 @@ impl Transaction {
             FunctionCall::RideRequestCancel(ride_request_cancel) => {
                 ride_request_cancel.verify_state(&self.from, db)
             }
-            FunctionCall::ConfirmArrival(confirm_arrival) => confirm_arrival.verify_state(db),
-            FunctionCall::ComplainArrival(complain_arrival) => complain_arrival.verify_state(db),
         }
     }
 
@@ -177,8 +175,6 @@ impl Transaction {
             FunctionCall::RidePay(_) => "RidePay",
             FunctionCall::RideCancel(_) => "RideCancel",
             FunctionCall::RideRequestCancel(_) => "RideRequestCancel",
-            FunctionCall::ConfirmArrival(_) => "ConfirmArrival",
-            FunctionCall::ComplainArrival(_) => "ComplainArrival",
         }
     }
 
@@ -209,10 +205,6 @@ impl Transaction {
             FunctionCall::RideCancel(ride_cancel) => ride_cancel.state_transaction(&self.hash, db),
             FunctionCall::RideRequestCancel(ride_request_cancel) => {
                 ride_request_cancel.state_transaction(&self.hash, db)
-            }
-            FunctionCall::ConfirmArrival(confirm_arrival) => confirm_arrival.state_transaction(db),
-            FunctionCall::ComplainArrival(complain_arrival) => {
-                complain_arrival.state_transaction(db)
             }
         };
 

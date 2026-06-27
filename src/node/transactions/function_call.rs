@@ -1,9 +1,11 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-use super::{complain_arrival::ComplainArrival, confirm_arrival::ConfirmArrival, ride_acceptance::RideAcceptance, ride_cancel::RideCancel, ride_offer::RideOffer, ride_pay::RidePay, ride_request::RideRequest, ride_request_cancel::RideRequestCancel, transfer::Transfer};
-
-
+use super::{
+    ride_acceptance::RideAcceptance, ride_cancel::RideCancel, ride_offer::RideOffer,
+    ride_pay::RidePay, ride_request::RideRequest, ride_request_cancel::RideRequestCancel,
+    transfer::Transfer,
+};
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(tag = "function_call_type", content = "arguments")]
@@ -15,8 +17,6 @@ pub enum FunctionCall {
     RidePay(RidePay),
     RideCancel(RideCancel),
     RideRequestCancel(RideRequestCancel),
-    ConfirmArrival(ConfirmArrival),
-    ComplainArrival(ComplainArrival),
 }
 
 impl fmt::Display for FunctionCall {
@@ -29,8 +29,6 @@ impl fmt::Display for FunctionCall {
             FunctionCall::RidePay(args) => write!(f, "RidePay: {:?}", args),
             FunctionCall::RideCancel(args) => write!(f, "RideCancel: {:?}", args),
             FunctionCall::RideRequestCancel(args) => write!(f, "RideRequestCancel: {:?}", args),
-            FunctionCall::ConfirmArrival(args) => write!(f, "ConfirmArrival: {:?}", args),
-            FunctionCall::ComplainArrival(args) => write!(f, "ComplainArrival: {:?}", args),
         }
     }
 }

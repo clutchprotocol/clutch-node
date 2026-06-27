@@ -23,7 +23,6 @@ Clutch Node is the blockchain core for Clutch Protocol — Aura consensus, custo
 | 3 | RideAcceptance | Passenger accepts offer |
 | 4 | RidePay | Payment (partial OK) |
 | 5 | RideCancel | Cancel active trip |
-| 6–7 | Confirm/Complain Arrival | Stubs (not in Hub/SDK yet) |
 | 8 | RideRequestCancel | Cancel pending request |
 
 ## JSON-RPC (WebSocket)

@@ -68,7 +68,7 @@ mod tests {
                 println!("- 7 items in top-level list");
                 println!("- Fields: [from, nonce, signature_r, signature_s, signature_v, hash, data]");
                 println!("- 'data' should be a list [tag, args] where:");
-                println!("  - tag is a u8 (0-7) indicating function call type");
+                println!("  - tag is a u8 (0-5, 8) indicating function call type");
                 println!("  - args varies depending on tag");
             },
         }
