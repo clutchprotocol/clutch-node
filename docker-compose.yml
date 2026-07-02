@@ -27,7 +27,7 @@ services:
       - "3002:3002"
     volumes:
       - ./config:/app/config:ro
-    command: ["--env", "node2"]
+    command: ["--env", "node2-docker"]
 
   node3:
     image: ghcr.io/clutchprotocol/clutch-node:latest
@@ -42,7 +42,7 @@ services:
       - "3003:3003"
     volumes:
       - ./config:/app/config:ro
-    command: ["--env", "node3"]
+    command: ["--env", "node3-docker"]
 
 networks:
   clutch-network:

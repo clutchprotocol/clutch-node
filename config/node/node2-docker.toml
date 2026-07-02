@@ -1,3 +1,5 @@
+# Node 2 - Docker (this repo's docker-compose.yml). Bootstrap uses the node1
+# container hostname; for host-local runs use node2.toml (127.0.0.1) instead.
 libp2p_topic_name = "test-net"
 blockchain_name = "clutch-node-test-2"
 author_public_key = "0x6fc11ba44483201f6e9c5eba6435805bb94ad080"
@@ -5,9 +7,7 @@ author_secret_key = "9aba0d89bfa358d27cfc119657537b9c92c8e38a35d2333ddd5c62e6d1a
 developer_mode = true
 websocket_addr = "0.0.0.0:8082"
 listen_addrs = ["/ip4/0.0.0.0/tcp/4002"]
-# node1 on the same host (config/node/node1.toml listens on /ip4/0.0.0.0/tcp/4001).
-# Docker uses config/node/node2-docker.toml (bootstrap /dns4/node1/tcp/4001) instead.
-bootstrap_nodes = ["/ip4/127.0.0.1/tcp/4001"]
+bootstrap_nodes = ["/dns4/node1/tcp/4001"]
 authorities = [
     "0x9b6e8afff8329743cac73dbef83ca3cbf9a74c20",
     "0x6fc11ba44483201f6e9c5eba6435805bb94ad080",
