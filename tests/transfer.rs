@@ -41,6 +41,7 @@ fn transfer_founds() {
 
     let latest_block = blockchain
         .get_latest_block()
+        .expect("db read failed")
         .expect("Failed to get the latest block");
 
     info!(
@@ -57,6 +58,7 @@ fn transfer_founds() {
 fn import_block(blockchain: &mut Blockchain, block: &mut Block) -> Result<(), String> {
     block.previous_hash = blockchain
         .get_latest_block()
+        .expect("db read failed")
         .expect("Failed to get the latest block")
         .hash;
 

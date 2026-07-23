@@ -230,7 +230,13 @@ async fn handle_handshake_response(
         Ok(handshake) => {
             debug!("Decoded Handshake: {:?}", handshake);
             let blockchain = blockchain.lock().await;
-            let current_block_index = blockchain.handshake().unwrap().latest_block_index;
+            let current_block_index = match blockchain.handshake() {
+                Ok(handshake) => handshake.latest_block_index,
+                Err(e) => {
+                    error!("Failed to read local handshake state: {}", e);
+                    return;
+                }
+            };
             let received_block_index = handshake.latest_block_index;
 
             if current_block_index < received_block_index {
@@ -310,10 +316,15 @@ async fn handshake_response(
     blockchain: &Arc<Mutex<Blockchain>>,
 ) -> Vec<u8> {
     let blockchain = blockchain.lock().await;
-    let response_handshake = blockchain
-        .handshake()
-        .expect("error get handshake response");
-    encode_message(DirectMessageType::Handshake, &response_handshake)
+    match blockchain.handshake() {
+        Ok(response_handshake) => {
+            encode_message(DirectMessageType::Handshake, &response_handshake)
+        }
+        Err(e) => {
+            error!("Failed to build handshake response: {}", e);
+            Vec::new()
+        }
+    }
 }
 
 async fn get_block_headers_response(
@@ -321,13 +332,17 @@ async fn get_block_headers_response(
     blockchain: &Arc<Mutex<Blockchain>>,
 ) -> Vec<u8> {
     let blockchain = blockchain.lock().await;
-    let blocks = blockchain
-        .get_blocks_with_limit_and_skip(
-            get_block_header.start_block_index,
-            get_block_header.skip,
-            get_block_header.limit,
-        )
-        .expect("Failed to get blocks");
+    let blocks = match blockchain.get_blocks_with_limit_and_skip(
+        get_block_header.start_block_index,
+        get_block_header.skip,
+        get_block_header.limit,
+    ) {
+        Ok(blocks) => blocks,
+        Err(e) => {
+            error!("Failed to get blocks for headers response: {}", e);
+            return Vec::new();
+        }
+    };
 
     let block_headers: Vec<BlockHeader> =
         blocks.iter().map(|block| block.to_block_header()).collect();

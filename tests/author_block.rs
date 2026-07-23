@@ -37,6 +37,7 @@ fn author_block() {
 
     let latest_block = blockchain
         .get_latest_block()
+        .expect("db read failed")
         .expect("Failed to get the latest block");
 
     info!(

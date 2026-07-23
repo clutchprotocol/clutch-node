@@ -129,6 +129,7 @@ fn import_block(blockchain: &mut Blockchain, block: &mut Block) -> Result<(), St
 fn get_previous_hash(blockchain: &Blockchain) -> String {
     blockchain
         .get_latest_block()
+        .expect("db read failed")
         .expect("Failed to get the latest block")
         .hash
 }

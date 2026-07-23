@@ -57,11 +57,11 @@ impl Blockchain {
         blockchain
     }
 
-    pub fn get_latest_block(&self) -> Option<Block> {
+    pub fn get_latest_block(&self) -> Result<Option<Block>, String> {
         Block::get_latest_block(&self.db)
     }
 
-    pub fn get_genesis_block(&self) -> Option<Block> {
+    pub fn get_genesis_block(&self) -> Result<Option<Block>, String> {
         Block::get_genesis_block(&self.db)
     }
 
@@ -122,7 +122,7 @@ impl Blockchain {
             self.block_reward_amount,
             self.ride_request_referrer_fee_percent,
             self.ride_offer_referrer_fee_percent,
-        );
+        )?;
 
         Ok(())
     }
@@ -163,11 +163,11 @@ impl Blockchain {
 
     pub fn handshake(&self) -> Result<Handshake, String> {
         let latest_block = self
-            .get_latest_block()
+            .get_latest_block()?
             .ok_or_else(|| "Failed to get latest block".to_string())?;
 
         let genesis_block = self
-            .get_genesis_block()
+            .get_genesis_block()?
             .ok_or_else(|| "Failed to get genesis block".to_string())?;
 
         Ok(Handshake {
@@ -219,7 +219,7 @@ impl Blockchain {
     }
 
     pub fn author_new_block(&self) -> Result<Block, String> {
-        let latest_block = match self.get_latest_block() {
+        let latest_block = match self.get_latest_block()? {
             Some(block) => block,
             None => return Err("Failed to get the latest block in author_new_block".to_string()),
         };

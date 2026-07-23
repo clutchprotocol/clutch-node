@@ -101,20 +101,22 @@ impl Block {
         signature_keys::SignatureKeys::verify(author, data, r, s, v)
     }
 
-    pub fn get_latest_block(db: &Database) -> Option<Block> {
+    pub fn get_latest_block(db: &Database) -> Result<Option<Block>, String> {
         match db.get("blockchain", b"blockchain_latest_block") {
             Ok(Some(value)) => {
-                let block_str = String::from_utf8(value).unwrap();
-                let block: Block = serde_json::from_str(&block_str).unwrap();
-                Some(block)
+                let block_str = String::from_utf8(value)
+                    .map_err(|e| format!("Latest block is not valid UTF-8: {}", e))?;
+                let block: Block = serde_json::from_str(&block_str)
+                    .map_err(|e| format!("Failed to deserialize latest block: {}", e))?;
+                Ok(Some(block))
             }
-            Ok(None) => None,
-            Err(_) => panic!("Failed to retrieve the latest block index"),
+            Ok(None) => Ok(None),
+            Err(e) => Err(format!("Failed to retrieve the latest block: {}", e)),
         }
     }
 
     pub fn validate_block(&self, db: &Database) -> Result<bool, String> {
-        match Block::get_latest_block(db) {
+        match Block::get_latest_block(db)? {
             Some(latest_block) => {
                 match self.verify_signature() {
                     Ok(is_verified) => {
@@ -258,27 +260,34 @@ impl Block {
     }
 
     pub fn genesis_import_block(db: &Database) {
+        // ponytail: boot-time genesis. Fail-fast (panic) here is intentional — a node
+        // that can't read or write its genesis block cannot run. Runtime paths return Result.
         match Self::get_genesis_block(db) {
-            Some(_) => {
+            Ok(Some(_)) => {
                 warn!("Genesis block already exists.");
             }
-            None => {
+            Ok(None) => {
                 info!("Genesis block does not exist, creating new one...");
                 let genesis_block = Self::new_genesis_block();
-                Self::add_block_to_chain(db, &genesis_block, 0, 0, 0);
+                if let Err(e) = Self::add_block_to_chain(db, &genesis_block, 0, 0, 0) {
+                    panic!("Failed to import genesis block: {}", e);
+                }
             }
+            Err(e) => panic!("Failed to read genesis block: {}", e),
         }
     }
 
-    pub fn get_genesis_block(db: &Database) -> Option<Block> {
+    pub fn get_genesis_block(db: &Database) -> Result<Option<Block>, String> {
         match db.get("block", b"block_0") {
             Ok(Some(value)) => {
-                let block_str = String::from_utf8(value).unwrap();
-                let block: Block = serde_json::from_str(&block_str).unwrap();
-                Some(block)
+                let block_str = String::from_utf8(value)
+                    .map_err(|e| format!("Genesis block is not valid UTF-8: {}", e))?;
+                let block: Block = serde_json::from_str(&block_str)
+                    .map_err(|e| format!("Failed to deserialize genesis block: {}", e))?;
+                Ok(Some(block))
             }
-            Ok(None) => None,
-            Err(_) => panic!("Failed to retrieve the genesis block"),
+            Ok(None) => Ok(None),
+            Err(e) => Err(format!("Failed to retrieve the genesis block: {}", e)),
         }
     }
 
@@ -288,7 +297,7 @@ impl Block {
         block_reward_amount: u64,
         ride_request_referrer_fee_percent: u8,
         ride_offer_referrer_fee_percent: u8,
-    ) {
+    ) -> Result<(), String> {
         // Storage for keys and values
         let mut cf_storage: Vec<String> = Vec::new();
         let mut keys_storage: Vec<Vec<u8>> = Vec::new();
@@ -306,7 +315,7 @@ impl Block {
             }
         } else {
             error!("Failed to serialize block for storage.");
-            return;
+            return Err("Failed to serialize block for storage.".to_string());
         }
 
         // Handle Blockchain State
@@ -318,7 +327,7 @@ impl Block {
             }
         } else {
             error!("Failed to serialize block for storage.");
-            return;
+            return Err("Failed to serialize block for storage.".to_string());
         }
 
         // Handle transactions State
@@ -418,8 +427,9 @@ impl Block {
                         block_hash: block.hash.to_string(),
                     })
                     .set(block.index as i64);
+                Ok(())
             }
-            Err(e) => panic!("Failed add_block_to_chain: {}", e),
+            Err(e) => Err(format!("Failed add_block_to_chain: {}", e)),
         }
     }
 

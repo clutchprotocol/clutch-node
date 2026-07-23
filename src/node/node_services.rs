@@ -194,7 +194,13 @@ impl NodeServices {
                 debug!("Selected peer for synchronization: {:?}", pid);
 
                 let blockchain = blockchain.lock().await;
-                let handshake = blockchain.handshake().unwrap();
+                let handshake = match blockchain.handshake() {
+                    Ok(handshake) => handshake,
+                    Err(e) => {
+                        error!("Failed to build handshake: {}", e);
+                        return;
+                    }
+                };
                 let encoded_handshake = encode(&handshake);
 
                 if let Err(e) = P2PServer::send_direct_message_command(
