@@ -180,9 +180,11 @@ impl Block {
         limit: usize,
     ) -> Result<Vec<Block>, String> {
         let mut blocks = Vec::new();
-        let end_index = start_index + skip + limit;
+        // saturating so a peer-supplied huge skip/limit can't overflow-panic here.
+        let start = start_index.saturating_add(skip);
+        let end_index = start.saturating_add(limit);
 
-        for index in start_index + skip..end_index {
+        for index in start..end_index {
             let key = format!("block_{}", index);
             match db.get("block", key.as_bytes()) {
                 Ok(Some(value)) => match serde_json::from_slice::<Block>(&value) {

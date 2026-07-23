@@ -1,5 +1,4 @@
 use crate::node::blockchain::Blockchain;
-use crate::node::blocks::block::Block;
 use crate::node::transactions::ride_request::MapBounds;
 use crate::node::transactions::transaction::Transaction;
 use crate::node::p2p_server::{GossipMessageType, P2PServer, P2PServerCommand};
@@ -9,10 +8,15 @@ use tracing::{error, info, warn};
 use std::error::Error;
 use std::sync::Arc;
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::Mutex;
-use tokio_tungstenite::accept_async;
-use tokio_tungstenite::tungstenite::protocol::Message;
+use tokio::sync::{Mutex, Semaphore};
+use tokio_tungstenite::accept_async_with_config;
+use tokio_tungstenite::tungstenite::protocol::{Message, WebSocketConfig};
 use hex;
+
+// Bound per-connection message size and total concurrent connections so an
+// unauthenticated peer can't exhaust memory or tasks (default frame cap is 64 MiB).
+const MAX_WS_MESSAGE_BYTES: usize = 1 << 20; // 1 MiB
+const MAX_WS_CONNECTIONS: usize = 256;
 
 pub struct WebSocket;
 
@@ -25,10 +29,23 @@ impl WebSocket {
         let listener = TcpListener::bind(addr).await?;
         info!("WebSocket server started on {}", addr);
 
+        let connections = Arc::new(Semaphore::new(MAX_WS_CONNECTIONS));
+
         while let Ok((stream, _)) = listener.accept().await {
+            let permit = match Arc::clone(&connections).try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => {
+                    warn!(
+                        "WebSocket connection limit ({}) reached; dropping peer",
+                        MAX_WS_CONNECTIONS
+                    );
+                    continue;
+                }
+            };
             let blockchain = Arc::clone(&blockchain);
             let command_tx_p2p = command_tx_p2p.clone();
             tokio::spawn(async move {
+                let _permit = permit; // released when the connection ends
                 if let Err(e) = Self::handle_connection(stream, blockchain, command_tx_p2p).await {
                     error!("Error handling connection: {}", e);
                 }
@@ -43,7 +60,10 @@ impl WebSocket {
         blockchain: Arc<Mutex<Blockchain>>,
         command_tx_p2p: tokio::sync::mpsc::Sender<P2PServerCommand>,
     ) -> Result<(), Box<dyn Error>> {
-        let ws_stream = accept_async(stream).await?;
+        let mut config = WebSocketConfig::default();
+        config.max_message_size = Some(MAX_WS_MESSAGE_BYTES);
+        config.max_frame_size = Some(MAX_WS_MESSAGE_BYTES);
+        let ws_stream = accept_async_with_config(stream, Some(config)).await?;
         let (mut ws_sender, mut ws_receiver) = ws_stream.split();
 
         while let Some(message) = ws_receiver.next().await {
@@ -99,12 +119,6 @@ impl WebSocket {
             }
             "send_raw_transaction" => {
                 Self::handle_send_raw_transaction(params, id, blockchain, command_tx_p2p).await
-            }
-            "import_block" => {
-                Self::handle_import_block(params, id, blockchain, command_tx_p2p).await
-            }
-            "author_new_block" => {
-                Self::handle_author_new_block(id, blockchain, command_tx_p2p).await
             }
             "get_next_nonce" => {
                 Self::handle_get_next_nonce(params, id, blockchain).await
@@ -214,58 +228,6 @@ impl WebSocket {
         let encoded_tx = encode(&transaction);
         P2PServer::gossip_message_command(command_tx_p2p, GossipMessageType::Transaction, &encoded_tx).await;
         Some(json_rpc_success_response(serde_json::json!("Transaction imported"), id))
-    }
-
-    async fn handle_import_block(
-        params: serde_json::Value,
-        id: serde_json::Value,
-        blockchain: &Arc<Mutex<Blockchain>>,
-        command_tx_p2p: tokio::sync::mpsc::Sender<P2PServerCommand>,
-    ) -> Option<String> {
-        let block: Block = match serde_json::from_value(params) {
-            Ok(b) => b,
-            Err(e) => {
-                warn!("Invalid params for 'import_block': {}", e);
-                return Some(json_rpc_error_response(-32602, "Invalid params", id));
-            }
-        };
-
-        let blockchain = blockchain.lock().await;
-        if let Err(e) = blockchain.import_block(&block) {
-            error!("Failed to import block: {}", e);
-            return Some(json_rpc_error_response(-32000, &format!("Failed to import block: {}", e), id));
-        }
-
-        info!("Block imported to blockchain from WebSocket.");
-
-        // Gossip block
-        let encoded_block = encode(&block);
-        P2PServer::gossip_message_command(command_tx_p2p, GossipMessageType::Block, &encoded_block).await;
-
-        Some(json_rpc_success_response(serde_json::json!("Block imported"), id))
-    }
-
-    async fn handle_author_new_block(
-        id: serde_json::Value,
-        blockchain: &Arc<Mutex<Blockchain>>,
-        command_tx_p2p: tokio::sync::mpsc::Sender<P2PServerCommand>,
-    ) -> Option<String> {
-        let blockchain = blockchain.lock().await;
-        let new_block = match blockchain.author_new_block() {
-            Ok(block) => block,
-            Err(e) => {
-                error!("Failed to author new block: {}", e);
-                return Some(json_rpc_error_response(-32000, &format!("Failed to author new block: {}", e), id));
-            }
-        };
-
-        info!("New block authored and added to the blockchain from WebSocket.");
-
-        // Gossip new block
-        let encoded_block = encode(&new_block);
-        P2PServer::gossip_message_command(command_tx_p2p, GossipMessageType::Block, &encoded_block).await;
-
-        Some(json_rpc_success_response(serde_json::json!("New block authored"), id))
     }
 
     async fn handle_get_next_nonce(

@@ -24,6 +24,10 @@ pub async fn handle_gossipsub_message(
         String::from_utf8_lossy(&message.data),
     );
 
+    if message.data.is_empty() {
+        error!("Received empty gossip message from peer: {}", peer_id);
+        return;
+    }
     let message_type = GossipMessageType::from_byte(message.data[0]);
     let payload = &message.data[1..];
 

@@ -79,6 +79,10 @@ async fn handle_request_message(
         peer, request_id,
     );
 
+    if request.message.is_empty() {
+        error!("Received empty direct message from peer {:?}", peer);
+        return;
+    }
     let message_type = DirectMessageType::from_byte(request.message[0]);
     let payload = &request.message[1..];
 
@@ -114,6 +118,10 @@ async fn handle_response_message(
         peer_id, request_id,
     );
 
+    if response.message.is_empty() {
+        error!("Received empty direct message response from {:?}", peer_id);
+        return;
+    }
     let message_type = DirectMessageType::from_byte(response.message[0]);
     let payload = &response.message[1..];
 
@@ -327,15 +335,19 @@ async fn handshake_response(
     }
 }
 
+/// Cap how many blocks a single peer request can pull, bounding CPU/memory/DB work.
+const MAX_BLOCKS_PER_REQUEST: usize = 100;
+
 async fn get_block_headers_response(
     get_block_header: &GetBlockHeaders,
     blockchain: &Arc<Mutex<Blockchain>>,
 ) -> Vec<u8> {
     let blockchain = blockchain.lock().await;
+    let limit = get_block_header.limit.min(MAX_BLOCKS_PER_REQUEST);
     let blocks = match blockchain.get_blocks_with_limit_and_skip(
         get_block_header.start_block_index,
         get_block_header.skip,
-        get_block_header.limit,
+        limit,
     ) {
         Ok(blocks) => blocks,
         Err(e) => {
@@ -356,7 +368,13 @@ async fn get_block_bodies_response(
     blockchain: &Arc<Mutex<Blockchain>>,
 ) -> Vec<u8> {
     let blockchain = blockchain.lock().await;
-    let blocks = match blockchain.get_blocks_by_indexes(get_block_bodies.block_indexes.clone()) {
+    let indexes: Vec<usize> = get_block_bodies
+        .block_indexes
+        .iter()
+        .copied()
+        .take(MAX_BLOCKS_PER_REQUEST)
+        .collect();
+    let blocks = match blockchain.get_blocks_by_indexes(indexes) {
         Ok(blocks) => blocks,
         Err(e) => {
             error!("Failed to get blocks for bodies response: {}", e);
