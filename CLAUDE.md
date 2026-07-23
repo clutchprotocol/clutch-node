@@ -44,7 +44,7 @@ All methods are matched by string in `WebSocket::handle_json_rpc_request` in `sr
 - Files: `config/node/{default,node1,node2,node3}.toml`, selected by `--env <name>` (default `default`). Env overrides use `APP_` prefix (e.g. `APP_LOG_LEVEL`); `.env` is loaded via dotenv. Config path is **relative to cwd** — run from the repo root.
 - `default` ≈ node1 (authority 1, ws 8081, p2p 4001, metrics 3001, no bootstrap, local Seq). node2/node3 differ in: `blockchain_name` (separate DB dir), author keypair (authorities 2/3), ports (8082/4002/3002, 8083/4003/3003), and `bootstrap_nodes` — `/ip4/127.0.0.1/tcp/4001` (node1 on the same host; mdns also discovers local peers).
 - This repo's `docker-compose.yml` uses `node2-docker.toml`/`node3-docker.toml` (`--env node2-docker`), which bootstrap via `/dns4/node1/tcp/4001` — env override is not an option because `bootstrap_nodes` is a `Vec<String>` and the config loader does no list parsing. clutch-deploy mounts its own config copies (`clutch-deploy/config/node/*.toml`, also `/dns4/node1/...`) and is unaffected by this repo's TOMLs.
-- All three well-known authority keypairs (and the genesis-funded account `0xdeb4...6cc0` holding `u64::MAX`) are committed in configs/tests — dev-only keys.
+- All three well-known authority keypairs (and the genesis-funded account `0xdeb4...6cc0` holding `i64::MAX`) are committed in configs/tests — dev-only keys.
 - `developer_mode = true` deletes the RocksDB and dumps chain+pool JSON to `output/` on shutdown.
 - DB path: `{DB_PATH or cwd}/{blockchain_name}.db`.
 

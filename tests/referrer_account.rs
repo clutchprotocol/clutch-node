@@ -39,7 +39,8 @@ fn referrer_fee_ceiling_pays_on_small_fare() {
 
 #[test]
 fn legacy_account_balance_readable_via_canonical_address() {
-    let db = Database::new_db("clutch-node-test-referrer-legacy-read");
+    let name = "clutch-node-test-referrer-legacy-read";
+    let mut db = Database::new_db(name);
     let legacy_key = format!("account_state_{}", LEGACY_REFERRER);
     let legacy_state = serde_json::json!({
         "public_key": LEGACY_REFERRER,
@@ -55,11 +56,16 @@ fn legacy_account_balance_readable_via_canonical_address() {
     let state = AccountState::get_current_state(&CANONICAL_REFERRER.to_string(), &db);
     assert_eq!(state.balance, 12);
     assert_eq!(state.public_key, CANONICAL_REFERRER);
+
+    // Clean up so re-runs start from an empty DB (these tests are not idempotent otherwise).
+    db.close();
+    db.delete_database(name).ok();
 }
 
 #[test]
 fn update_account_state_writes_canonical_key() {
-    let db = Database::new_db("clutch-node-test-referrer-canonical-write");
+    let name = "clutch-node-test-referrer-canonical-write";
+    let mut db = Database::new_db(name);
     let (key, value) = AccountState::update_account_state_key(
         &LEGACY_REFERRER.to_string(),
         5,
@@ -72,6 +78,10 @@ fn update_account_state_writes_canonical_key() {
 
     let state = AccountState::get_current_state(&CANONICAL_REFERRER.to_string(), &db);
     assert_eq!(state.balance, 5);
+
+    // Clean up so re-runs start from an empty DB (this test is not idempotent otherwise).
+    db.close();
+    db.delete_database(name).ok();
 }
 
 #[test]
