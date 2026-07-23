@@ -356,9 +356,13 @@ async fn get_block_bodies_response(
     blockchain: &Arc<Mutex<Blockchain>>,
 ) -> Vec<u8> {
     let blockchain = blockchain.lock().await;
-    let blocks = blockchain
-        .get_blocks_by_indexes(get_block_bodies.block_indexes.clone())
-        .expect("Failed to get blocks");
+    let blocks = match blockchain.get_blocks_by_indexes(get_block_bodies.block_indexes.clone()) {
+        Ok(blocks) => blocks,
+        Err(e) => {
+            error!("Failed to get blocks for bodies response: {}", e);
+            return Vec::new();
+        }
+    };
 
     let response_block_bodies = BlockBodies { blocks };
     encode_message(DirectMessageType::BlockBodies, &response_block_bodies)
