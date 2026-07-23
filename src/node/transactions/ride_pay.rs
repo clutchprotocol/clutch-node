@@ -1,6 +1,5 @@
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 use tracing::error;
 
 use crate::node::account_state::AccountState;
@@ -18,13 +17,20 @@ fn referrer_fee_ceiling(percent: u8, fare: u64) -> u64 {
     if percent == 0 || fare == 0 {
         return 0;
     }
-    (percent as u64 * fare + 99) / 100
+    // saturating so an absurd fare can't overflow-panic (debug) or wrap (release).
+    ((percent as u64).saturating_mul(fare).saturating_add(99)) / 100
 }
 
-#[derive(Default)]
-struct ReferrerFeeParts {
-    request: u64,
-    offer: u64,
+/// Split `fare` into (request-referrer fee, offer-referrer fee, driver remainder),
+/// capping the two fees so their sum can never exceed `fare`. Without the cap, ceiling
+/// rounding on tiny fares (2% of 1 rounds up to 1 on each side) makes the fees sum to
+/// more than the fare, and `fare - total_deducted` underflows the driver's u64 amount
+/// (wrapping to ~u64::MAX in release builds — a money mint).
+fn split_fare(fare: u64, request_fee: u64, offer_fee: u64) -> (u64, u64, u64) {
+    let request = request_fee.min(fare);
+    let offer = offer_fee.min(fare - request);
+    let driver = fare - request - offer;
+    (request, offer, driver)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -159,51 +165,45 @@ impl RidePay {
             StateUpdate::storage_only(fare_paid_key, fare_paid_value),
         ];
 
-        let mut referrer_fees: HashMap<String, ReferrerFeeParts> = HashMap::new();
-
-        if let Some(ref req_ref) = request_referrer {
-            let fee = referrer_fee_ceiling(request_fee_percent, self.fare);
-            if fee > 0 {
-                let canonical = canonical_account_address(req_ref);
-                referrer_fees.entry(canonical).or_default().request += fee;
-            }
-        }
-
-        if let Some(ref off_ref) = offer_referrer {
-            let fee = referrer_fee_ceiling(offer_fee_percent, self.fare);
-            if fee > 0 {
-                let canonical = canonical_account_address(off_ref);
-                referrer_fees.entry(canonical).or_default().offer += fee;
-            }
-        }
+        // Cap referrer fees so request + offer can never exceed the fare being paid; the
+        // driver gets the remainder. Prevents the `fare - total_deducted` underflow.
+        let request_fee = match &request_referrer {
+            Some(_) => referrer_fee_ceiling(request_fee_percent, self.fare),
+            None => 0,
+        };
+        let offer_fee = match &offer_referrer {
+            Some(_) => referrer_fee_ceiling(offer_fee_percent, self.fare),
+            None => 0,
+        };
+        let (request_fee, offer_fee, driver_amount) =
+            split_fare(self.fare, request_fee, offer_fee);
 
         let passenger_cp = Some(passenger.clone());
-        let mut total_deducted: u64 = 0;
 
-        for (referrer, parts) in referrer_fees {
-            if parts.request > 0 {
+        if request_fee > 0 {
+            if let Some(ref req_ref) = request_referrer {
                 updates.push(AccountState::apply_balance_change(
-                    &referrer,
-                    parts.request as i64,
+                    &canonical_account_address(req_ref),
+                    request_fee as i64,
                     BalanceEffectKind::ReferrerRequestFee,
                     passenger_cp.clone(),
                     db,
                 ));
-                total_deducted += parts.request;
             }
-            if parts.offer > 0 {
+        }
+
+        if offer_fee > 0 {
+            if let Some(ref off_ref) = offer_referrer {
                 updates.push(AccountState::apply_balance_change(
-                    &referrer,
-                    parts.offer as i64,
+                    &canonical_account_address(off_ref),
+                    offer_fee as i64,
                     BalanceEffectKind::ReferrerOfferFee,
                     passenger_cp.clone(),
                     db,
                 ));
-                total_deducted += parts.offer;
             }
         }
 
-        let driver_amount = self.fare - total_deducted;
         updates.push(AccountState::apply_balance_change(
             &driver,
             driver_amount as i64,
@@ -238,5 +238,39 @@ impl Decodable for RidePay {
             ride_acceptance_transaction_hash: rlp.val_at(0)?,
             fare: rlp.val_at(1)?,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{referrer_fee_ceiling, split_fare};
+
+    #[test]
+    fn split_fare_never_exceeds_fare() {
+        // Normal fares: fees fit, driver gets the rest.
+        assert_eq!(split_fare(100, 2, 2), (2, 2, 96));
+        // Ceiling overshoot on tiny fare: 2% of 1 rounds to 1 on each side (sum 2 > 1).
+        // Capped so the total stays 1 and the driver amount never underflows.
+        assert_eq!(split_fare(1, 1, 1), (1, 0, 0));
+        // Misconfigured fees summing to > 100%: still capped at the fare.
+        assert_eq!(split_fare(10, 8, 8), (8, 2, 0));
+        // No referrers: driver gets the whole fare.
+        assert_eq!(split_fare(50, 0, 0), (0, 0, 50));
+        // Invariant across a range: request + offer + driver == fare, no overflow.
+        for fare in [0u64, 1, 2, 3, 100, u64::MAX] {
+            let fee = referrer_fee_ceiling(60, fare);
+            let (r, o, d) = split_fare(fare, fee, fee);
+            assert_eq!(r + o + d, fare, "fare {}", fare);
+            assert!(r + o <= fare);
+        }
+    }
+
+    #[test]
+    fn referrer_fee_ceiling_saturates() {
+        assert_eq!(referrer_fee_ceiling(0, 100), 0);
+        assert_eq!(referrer_fee_ceiling(2, 0), 0);
+        assert_eq!(referrer_fee_ceiling(2, 100), 2);
+        assert_eq!(referrer_fee_ceiling(2, 1), 1); // ceiling rounds up
+        let _ = referrer_fee_ceiling(100, u64::MAX); // must not overflow-panic
     }
 }

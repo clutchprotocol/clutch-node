@@ -4,6 +4,19 @@ use crate::node::transactions::address::{
     canonical_account_address, legacy_account_address_hex,
 };
 use serde::{Deserialize, Serialize};
+use tracing::error;
+
+/// Apply a signed delta to a u64 balance with checked arithmetic, returning `None` on
+/// over/underflow. Replaces the old `(balance as i64 + change) as u64`, which silently
+/// corrupted any balance above i64::MAX — the genesis account at u64::MAX collapsed to a
+/// tiny value on its first credit.
+fn apply_delta(balance: u64, change: i64) -> Option<u64> {
+    if change >= 0 {
+        balance.checked_add(change as u64)
+    } else {
+        balance.checked_sub(change.unsigned_abs())
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AccountState {
@@ -64,8 +77,16 @@ impl AccountState {
         let canonical = canonical_account_address(public_key);
         let mut account_state = Self::get_current_state(&canonical, db);
         account_state.public_key = canonical.clone();
-        account_state.balance =
-            (account_state.balance as i64 + balance_change) as u64;
+        let current = account_state.balance;
+        account_state.balance = apply_delta(current, balance_change).unwrap_or_else(|| {
+            // ponytail: debit sufficiency is guaranteed upstream by verify_state /
+            // validate_transactions, so a clamp here signals an upstream bug — log it.
+            error!(
+                "balance over/underflow for {} (balance {}, change {}); clamping",
+                canonical, current, balance_change
+            );
+            if balance_change >= 0 { u64::MAX } else { 0 }
+        });
 
         let key = Self::construct_account_state_key(&canonical);
         let serialized = serde_json::to_string(&account_state)
@@ -148,5 +169,22 @@ impl AccountState {
         let account_nonce_key = Self::construct_account_nonce_key(&canonical);
         let account_nonce_serlized = nonce.to_be_bytes().to_vec();
         Ok((account_nonce_key, account_nonce_serlized))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::apply_delta;
+
+    #[test]
+    fn apply_delta_is_checked() {
+        assert_eq!(apply_delta(100, 50), Some(150));
+        assert_eq!(apply_delta(100, -40), Some(60));
+        assert_eq!(apply_delta(100, -100), Some(0));
+        assert_eq!(apply_delta(u64::MAX, -1), Some(u64::MAX - 1));
+        // Regression: the old `(balance as i64 + change) as u64` turned these into corrupt
+        // values (u64::MAX + 100 -> 99; 0 - 1 -> u64::MAX). Checked math returns None.
+        assert_eq!(apply_delta(u64::MAX, 100), None);
+        assert_eq!(apply_delta(0, -1), None);
     }
 }

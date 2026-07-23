@@ -47,7 +47,11 @@ impl Transaction {
             0,
             FunctionCall::Transfer(Transfer {
                 to: "0xdeb4cfb63db134698e1879ea24904df074726cc0".to_string(),
-                value: u64::MAX,
+                // ponytail: i64::MAX, not u64::MAX. Balance deltas travel as i64
+                // (transfer.rs `value as i64`), so funding u64::MAX only ever worked by
+                // two's-complement wrap. i64::MAX (~9.2e18) is still effectively infinite
+                // for a testnet faucet and keeps every balance representable in i64.
+                value: i64::MAX as u64,
             }),
         );
 
