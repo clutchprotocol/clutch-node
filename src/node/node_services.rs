@@ -153,55 +153,55 @@ impl NodeServices {
         blockchain: Arc<Mutex<Blockchain>>,
         command_tx_p2p: tokio::sync::mpsc::Sender<P2PServerCommand>,
     ) {
+        // Initial delay to let libp2p connections establish, then re-sync on an interval.
+        // A one-shot handshake at startup meant a node that fell behind later (was down,
+        // missed gossip, or rejected a non-chaining future block) never caught up until a
+        // manual restart. Periodically re-handshaking a connected peer reuses the existing
+        // handshake -> GetBlockHeaders/GetBlockBodies pull path: a no-op when already at the
+        // peer's height, a catch-up when behind.
+        // NOTE: this is LIVENESS only. It does not add fork-choice or finality — the node
+        // still follows a single linear chain and can't reorg onto a competing one. Choosing
+        // among divergent chains remains a separate consensus effort.
+        const INITIAL_DELAY_SECS: u64 = 3;
+        const SYNC_INTERVAL_SECS: u64 = 10;
+
         tokio::spawn(async move {
-            // Initial delay to allow libp2p connections to establish
-            tokio::time::sleep(Duration::from_secs(3)).await;
+            tokio::time::sleep(Duration::from_secs(INITIAL_DELAY_SECS)).await;
+            let mut interval = tokio::time::interval(Duration::from_secs(SYNC_INTERVAL_SECS));
 
-            // Retry until at least one peer is connected (e.g. bootstrap node)
-            const MAX_RETRIES: u32 = 15;
-            const RETRY_INTERVAL_SECS: u64 = 2;
+            loop {
+                interval.tick().await;
 
-            let mut peer_id = None;
-            for attempt in 1..=MAX_RETRIES {
-                let peers_result = P2PServer::get_connected_peers_command(command_tx_p2p.clone())
+                let peer_id = match P2PServer::get_connected_peers_command(command_tx_p2p.clone())
                     .await
-                    .map_err(|e| e.to_string());
-                match peers_result {
-                    Ok(connected_peers) => {
-                        peer_id = connected_peers.iter().next().cloned();
-                        if peer_id.is_some() {
-                            info!("connected peers: {:?}", connected_peers);
-                            break;
-                        }
-                        if attempt < MAX_RETRIES {
-                            debug!(
-                                "No peers connected yet (attempt {}/{}), retrying in {}s",
-                                attempt, MAX_RETRIES, RETRY_INTERVAL_SECS
-                            );
-                            tokio::time::sleep(Duration::from_secs(RETRY_INTERVAL_SECS)).await;
-                        }
-                    }
-                    Err(msg) => {
-                        error!("Failed to get connected peers: {}", msg);
-                        if attempt < MAX_RETRIES {
-                            tokio::time::sleep(Duration::from_secs(RETRY_INTERVAL_SECS)).await;
-                        }
-                    }
-                }
-            }
-
-            if let Some(pid) = peer_id {
-                debug!("Selected peer for synchronization: {:?}", pid);
-
-                let blockchain = blockchain.lock().await;
-                let handshake = match blockchain.handshake() {
-                    Ok(handshake) => handshake,
+                {
+                    Ok(connected_peers) => connected_peers.iter().next().cloned(),
                     Err(e) => {
-                        error!("Failed to build handshake: {}", e);
-                        return;
+                        error!("Failed to get connected peers: {}", e);
+                        continue;
                     }
                 };
-                let encoded_handshake = encode(&handshake);
+
+                let pid = match peer_id {
+                    Some(pid) => pid,
+                    None => {
+                        debug!("No peers connected yet; retrying sync next interval");
+                        continue;
+                    }
+                };
+
+                // Scope the lock to building the handshake — never hold the global
+                // blockchain Mutex across the network send below.
+                let encoded_handshake = {
+                    let blockchain = blockchain.lock().await;
+                    match blockchain.handshake() {
+                        Ok(handshake) => encode(&handshake),
+                        Err(e) => {
+                            error!("Failed to build handshake: {}", e);
+                            continue;
+                        }
+                    }
+                };
 
                 if let Err(e) = P2PServer::send_direct_message_command(
                     command_tx_p2p.clone(),
@@ -213,8 +213,6 @@ impl NodeServices {
                 {
                     error!("Failed to send handshake: {}", e);
                 }
-            } else {
-                error!("Failed to select a peer from the connected peers set after {} attempts. Ensure bootstrap_nodes are correct and node1 is reachable.", MAX_RETRIES);
             }
         });
     }
