@@ -17,11 +17,15 @@ examples/
 *.swo
 *~
 
-# Build artifacts (except what we need)
-target/debug/
-target/tmp/
-target/rust-analyzer/
+# Build artifacts — exclude the whole dir; nothing under target/ is ever COPY'd.
+# Listing subdirs left target/release/ inside the context, so a local
+# `cargo build --release` shipped GBs to the daemon on every docker build.
+/target
 *.pdb
+
+# RocksDB / sweep leftovers from local runs and tests
+*.db/
+sweep.timestamp
 
 # Test and output files
 output/
