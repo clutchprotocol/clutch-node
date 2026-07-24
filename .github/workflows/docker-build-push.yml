@@ -157,7 +157,7 @@ jobs:
           # shellcheck disable=SC2046  # word splitting is the point: expands to
           # `-t img:tag -t img:tag ...` and one `img@sha256:...` per digest file.
           docker buildx imagetools create \
-            $(jq -cr '.target."docker-metadata-action".tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
             $(printf '${{ env.GHCR_IMAGE }}@sha256:%s ' *)
 
       - name: Image digest
