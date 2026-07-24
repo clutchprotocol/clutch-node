@@ -10,6 +10,7 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'Dockerfile'
+      - '.dockerignore'
       - '.github/workflows/docker-build-push.yml'
   pull_request:
     branches: [ main ]
@@ -18,60 +19,130 @@ on:
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'Dockerfile'
+      - '.dockerignore'
   workflow_dispatch:
 
 env:
-  # Registries
-  GHCR_REGISTRY: ghcr.io
-  DH_REGISTRY: docker.io
-
-  GHCR_IMAGE: clutchprotocol/clutch-node
-  DH_IMAGE: 9194010019/clutch-node
+  GHCR_IMAGE: ghcr.io/clutchprotocol/clutch-node
+  DH_IMAGE: docker.io/9194010019/clutch-node
 
 permissions:
   contents: read
   packages: write
 
 jobs:
-  build-and-push:
-    runs-on: ubuntu-latest
+  # One job per architecture on a NATIVE runner. arm64 used to be cross-built with
+  # QEMU on ubuntu-latest, which emulates every instruction — rocksdb's C++ compile
+  # alone ran 5-10x slower there. GitHub-hosted arm64 runners are free for public
+  # repos, so both arches now compile natively and in parallel.
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-latest
+          - platform: linux/arm64
+            runner: ubuntu-24.04-arm
+
+    runs-on: ${{ matrix.runner }}
 
     steps:
+      - name: Platform slug (linux/amd64 -> linux-amd64)
+        run: echo "SLUG=${{ matrix.platform }}" | tr '/' '-' >> "$GITHUB_ENV"
+
       - name: Checkout repository
         uses: actions/checkout@v4
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # Login GHCR
       - name: Log in to GHCR
         if: github.event_name != 'pull_request'
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.GHCR_REGISTRY }}
+          registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Login Docker Hub
-      - name: Log in to Docker Hub
+      # Cache lives in GHCR, not type=gha. The Actions cache backend caps at 10 GB
+      # per repo; mode=max on a Rust build (deps target dir, x2 arches) blew past
+      # that every run, so the dependency layer was evicted and rocksdb rebuilt from
+      # scratch. A registry cache has no such cap. One cache tag per arch — a shared
+      # tag makes the two runners overwrite each other's manifest.
+      #
+      # Pushed by digest only; the `merge` job assembles the tagged manifest lists.
+      - name: Build and push by digest
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          platforms: ${{ matrix.platform }}
+          provenance: false
+          cache-from: type=registry,ref=${{ env.GHCR_IMAGE }}:buildcache-${{ env.SLUG }}
+          # ignore-error: cache export intermittently fails after a successful push
+          # (seen 2026-07-24, run 30084470164) — that must not fail the job, since
+          # trigger-stage-deploy needs this and a failed export would block deploys.
+          cache-to: ${{ github.event_name != 'pull_request' && format('type=registry,ref={0}:buildcache-{1},mode=max,ignore-error=true', env.GHCR_IMAGE, env.SLUG) || '' }}
+          # Empty on PRs: build-only verification, no output, no registry writes.
+          outputs: ${{ github.event_name != 'pull_request' && format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', env.GHCR_IMAGE) || '' }}
+
+      - name: Export digest
         if: github.event_name != 'pull_request'
+        run: |
+          mkdir -p /tmp/digests
+          digest='${{ steps.build.outputs.digest }}'
+          touch "/tmp/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ env.SLUG }}
+          path: /tmp/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  # Assemble the multi-arch manifest from the per-arch digests. No rebuild happens
+  # here — imagetools copies manifests/blobs, including cross-registry to Docker Hub.
+  merge:
+    needs: build
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request'
+
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
         uses: docker/login-action@v3
         with:
-          registry: ${{ env.DH_REGISTRY }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      # One metadata step generates tags for BOTH registries
       - name: Extract Docker metadata
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: |
-            ${{ env.GHCR_REGISTRY }}/${{ env.GHCR_IMAGE }}
-            ${{ env.DH_REGISTRY }}/${{ env.DH_IMAGE }}
+            ${{ env.GHCR_IMAGE }}
+            ${{ env.DH_IMAGE }}
           tags: |
             # sha-<short>
             type=sha,format=short
@@ -80,32 +151,21 @@ jobs:
             # اگر تگ گیت (v1.2.3) داشتی همون رو tag کن
             type=ref,event=tag
 
-      - name: Build and push Docker image (both registries)
-        id: build
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          file: ./Dockerfile
-          platforms: linux/amd64,linux/arm64
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          # ignore-error: GHA's cache backend intermittently 404s on export after a build
-          # has already pushed successfully (seen 2026-07-24, run 30084470164) — that must
-          # not fail the whole job, since trigger-stage-deploy needs: build-and-push and a
-          # failed cache-export otherwise silently blocks the stage deploy dispatch.
-          cache-to: type=gha,mode=max,ignore-error=true
-          build-args: |
-            BUILDKIT_INLINE_CACHE=1
+      - name: Create manifest lists on both registries
+        working-directory: /tmp/digests
+        run: |
+          # shellcheck disable=SC2046  # word splitting is the point: expands to
+          # `-t img:tag -t img:tag ...` and one `img@sha256:...` per digest file.
+          docker buildx imagetools create \
+            $(jq -cr '.target."docker-metadata-action".tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            $(printf '${{ env.GHCR_IMAGE }}@sha256:%s ' *)
 
       - name: Image digest
-        if: github.event_name != 'pull_request'
-        run: echo ${{ steps.build.outputs.digest }}
+        run: docker buildx imagetools inspect ${{ env.GHCR_IMAGE }}:${{ steps.meta.outputs.version }}
 
   # Optional: same secret as other Clutch repos — PAT with repo access to dispatch on clutch-deploy.
   trigger-stage-deploy:
-    needs: build-and-push
+    needs: merge
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
 
@@ -119,7 +179,7 @@ jobs:
           event-type: deploy-stage
 
   update-description:
-    needs: build-and-push
+    needs: merge
     runs-on: ubuntu-latest
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
 
@@ -132,5 +192,5 @@ jobs:
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
-          repository: ${{ env.DH_IMAGE }}
+          repository: 9194010019/clutch-node
           readme-filepath: ./README.md
