@@ -91,7 +91,11 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # ignore-error: GHA's cache backend intermittently 404s on export after a build
+          # has already pushed successfully (seen 2026-07-24, run 30084470164) — that must
+          # not fail the whole job, since trigger-stage-deploy needs: build-and-push and a
+          # failed cache-export otherwise silently blocks the stage deploy dispatch.
+          cache-to: type=gha,mode=max,ignore-error=true
           build-args: |
             BUILDKIT_INLINE_CACHE=1
 
