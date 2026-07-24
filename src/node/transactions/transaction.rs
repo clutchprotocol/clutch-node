@@ -111,11 +111,40 @@ impl Transaction {
             return Err("No transactions to validate.".to_string());
         }
 
+        // Reject a block carrying more than one transaction from the same account. Block
+        // state is validated against, and applied to, one deferred RocksDB batch that only
+        // commits at the end of `add_block_to_chain` — so a second tx from the same account
+        // both validates and applies against the *pre-block* balance/nonce. Two Transfers
+        // from one account would each read the full pre-block balance, both debit it, and
+        // the last-write-wins batch collapses the two debits into one while both credits
+        // land — minting CLT. Until intra-block state is applied incrementally, one tx per
+        // account per block is the safe ceiling (the author drains the rest into later
+        // blocks; see `Blockchain::one_tx_per_sender`).
+        // ponytail: lift this cap once per-tx state is visible to the next tx in the block.
+        if let Some(dup) = Self::first_duplicate_sender(transactions) {
+            return Err(format!(
+                "Block contains multiple transactions from the same account '{}'; only one per block is allowed.",
+                dup
+            ));
+        }
+
         for tx in transactions.iter() {
             tx.validate_transaction(&db)?;
         }
 
         Ok(())
+    }
+
+    /// First account that appears more than once in `transactions`, if any. Reads only
+    /// `from`, so it's pure/DB-free and unit-testable.
+    fn first_duplicate_sender(transactions: &[Transaction]) -> Option<String> {
+        let mut seen = std::collections::HashSet::new();
+        for tx in transactions {
+            if !seen.insert(tx.from.as_str()) {
+                return Some(tx.from.clone());
+            }
+        }
+        None
     }
 
     pub fn validate_transaction(&self, db: &Database) -> Result<(), String> {
@@ -220,5 +249,38 @@ impl Transaction {
         }
 
         states
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn tf(from: &str, nonce: u64, to: &str) -> Transaction {
+        Transaction::new_transaction(
+            from.to_string(),
+            nonce,
+            FunctionCall::Transfer(Transfer {
+                to: to.to_string(),
+                value: 1,
+            }),
+        )
+    }
+
+    #[test]
+    fn first_duplicate_sender_detects_repeat() {
+        let a = tf("0xA", 1, "0xB");
+        let b = tf("0xB", 1, "0xA");
+        // Distinct senders: allowed.
+        assert_eq!(
+            Transaction::first_duplicate_sender(&[a.clone(), b.clone()]),
+            None
+        );
+        // The mint vector: two txs from 0xA (same nonce, different recipient) — caught.
+        let a2 = tf("0xA", 1, "0xC");
+        assert_eq!(
+            Transaction::first_duplicate_sender(&[a, a2, b]),
+            Some("0xA".to_string())
+        );
     }
 }

@@ -64,7 +64,8 @@ docker compose up -d               # 3-node local net from ghcr image (this repo
 
 ## Gotchas / Conventions
 
-- Error handling is `Result<_, String>` everywhere (no anyhow/thiserror); DB read failures on hot paths (`get_latest_block`, `add_block_to_chain`) `panic!`.
+- Error handling is `Result<_, String>` everywhere (no anyhow/thiserror); DB read/write failures on hot paths (`get_latest_block`, `add_block_to_chain`) propagate as `Err`, not `panic!`.
+- **One transaction per account per block.** Block state is validated then applied as one deferred RocksDB batch (commit at end of `add_block_to_chain`), so a second tx from the same account would validate/apply against stale pre-block state — two Transfers from one account mint CLT via last-write-wins on the balance key. `validate_transactions` rejects any block with a duplicate sender; `Blockchain::one_tx_per_sender` enforces it at authoring time (extra txs wait for later blocks). Lift only once intra-block state is applied incrementally.
 - Logging via `tracing` macros; logs also ship to Seq (`seq_url`/`seq_api_key` in config).
 - State keys are string-prefixed in the `state` CF: `account_state_{addr}`, `account_nonce_{addr}`, `ride_request_{hash}`, `ride_request_{hash}:ride_acceptance`, `ride_acceptance_{hash}:fare_paid`, `tx_effects_{hash}`, `block_effects_{height}`, `account_effect_{addr}_{reverse_height}...` — see `docs/state_keys.csv` and `balance_effect.rs`.
 - Addresses: canonical form is `0x` + lowercase hex (`src/node/transactions/address.rs`); readers fall back to legacy no-prefix keys (`legacy_account_address_hex`) — preserve that dual-read when touching account state.

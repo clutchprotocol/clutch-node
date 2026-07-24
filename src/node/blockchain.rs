@@ -227,7 +227,7 @@ impl Blockchain {
         let index = latest_block.index + 1;
         let previous_hash = latest_block.hash;
         let transactions = match TransactionPool::get_transactions(&self.db) {
-            Ok(transactions) => transactions,
+            Ok(transactions) => Self::one_tx_per_sender(transactions),
             Err(e) => return Err(format!("Failed to get transactions from pool: {}", e)),
         };
 
@@ -235,6 +235,19 @@ impl Blockchain {
         new_block.sign(&self.author_public_key, &self.author_secret_key);
         self.import_block(&new_block)?;
         Ok(new_block)
+    }
+
+    /// Keep at most one pending tx per sender — the lowest nonce, tie-broken by hash for
+    /// determinism — so an authored block never contains two txs from the same account.
+    /// `Transaction::validate_transactions` rejects such blocks (deferred-batch staleness
+    /// mints CLT); without this the author would keep drafting a block the pool makes
+    /// invalid and never make progress. Extra same-account txs stay in the pool for later
+    /// blocks. ponytail: one tx/account/block; lift with incremental intra-block state.
+    fn one_tx_per_sender(mut transactions: Vec<Transaction>) -> Vec<Transaction> {
+        transactions.sort_by(|a, b| a.nonce.cmp(&b.nonce).then_with(|| a.hash.cmp(&b.hash)));
+        let mut seen = std::collections::HashSet::new();
+        transactions.retain(|tx| seen.insert(tx.from.clone()));
+        transactions
     }
 
     pub async fn start_network_services(self, config: &AppConfig) {
@@ -267,5 +280,43 @@ impl Blockchain {
             },
             Err(e) => error!("Failed to retrieve transactions in transaction pool: {}", e),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::node::transactions::function_call::FunctionCall;
+    use crate::node::transactions::transfer::Transfer;
+
+    fn tf(from: &str, nonce: u64, to: &str) -> Transaction {
+        Transaction::new_transaction(
+            from.to_string(),
+            nonce,
+            FunctionCall::Transfer(Transfer {
+                to: to.to_string(),
+                value: 1,
+            }),
+        )
+    }
+
+    #[test]
+    fn one_tx_per_sender_keeps_lowest_nonce() {
+        let kept = Blockchain::one_tx_per_sender(vec![
+            tf("0xA", 2, "0xC"),
+            tf("0xB", 5, "0xA"),
+            tf("0xA", 1, "0xB"),
+        ]);
+        assert_eq!(kept.len(), 2);
+        let a = kept.iter().find(|t| t.from == "0xA").unwrap();
+        assert_eq!(a.nonce, 1, "lowest-nonce tx kept per sender");
+        assert!(kept.iter().any(|t| t.from == "0xB"));
+    }
+
+    #[test]
+    fn one_tx_per_sender_collapses_duplicate_nonce_mint_vector() {
+        // Same account, same nonce, different recipients — the double-spend/mint input.
+        let kept = Blockchain::one_tx_per_sender(vec![tf("0xA", 1, "0xB"), tf("0xA", 1, "0xC")]);
+        assert_eq!(kept.len(), 1, "only one tx per sender survives block building");
     }
 }
