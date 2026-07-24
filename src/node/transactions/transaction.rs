@@ -368,4 +368,88 @@ mod tests {
             tx.verify_hash()
         );
     }
+
+    /// Builds a full signed tx for a `data` payload the way the SDK does: the hash is
+    /// Keccak-256 over the unsigned `[from (no 0x), nonce, data]` preimage, so these bytes are
+    /// self-consistent by construction. Anything the node's re-encode changes relative to the
+    /// wire bytes surfaces as a `verify_hash` mismatch.
+    fn sdk_style_tx(from_clean: &str, nonce: u64, data_rlp: &[u8]) -> Transaction {
+        let mut unsigned = RlpStream::new_list(3);
+        unsigned.append(&from_clean.to_string());
+        unsigned.append(&nonce);
+        unsigned.append_raw(data_rlp, 1);
+        let mut hasher = Keccak256::new();
+        hasher.update(unsigned.out().as_ref());
+        let hash_hex = hex::encode(hasher.finalize());
+
+        let dummy = "cd".repeat(32);
+        let mut full = RlpStream::new_list(7);
+        full.append(&from_clean.to_string());
+        full.append(&nonce);
+        full.append(&dummy);
+        full.append(&dummy);
+        full.append(&28u64);
+        full.append(&hash_hex);
+        full.append_raw(data_rlp, 1);
+        crate::node::rlp_encoding::decode(full.out().as_ref()).expect("decode sdk-style tx")
+    }
+
+    /// The referrer clutch-hub-api injects (clutch-deploy `config/api/default.toml`) is
+    /// canonical `0x…`, but the SDK RLP-encodes it with the prefix stripped and the node's
+    /// decoder canonicalizes it back. If `rlp_append` re-emits the prefixed form, the hash
+    /// preimage is longer than the wire bytes and every referred ride is rejected with
+    /// "Transaction hash mismatch" — as seen on app-stage.clutchprotocol.io.
+    const WIRE_REFERRER: &str = "0912514c7cc3eec2b2dab4e1d150c4b5eaee5a6f";
+    const WIRE_FROM: &str = "eec2b2dab4e1d150c4b5eaee5a6f091251400384";
+
+    #[test]
+    fn accepts_sdk_ride_request_with_injected_referrer() {
+        let mut pickup = RlpStream::new_list(2);
+        pickup.append(&35.7f64.to_bits());
+        pickup.append(&51.4f64.to_bits());
+        let pickup = pickup.out();
+
+        let mut dropoff = RlpStream::new_list(2);
+        dropoff.append(&35.8f64.to_bits());
+        dropoff.append(&51.5f64.to_bits());
+        let dropoff = dropoff.out();
+
+        let mut args = RlpStream::new_list(4);
+        args.append_raw(pickup.as_ref(), 1);
+        args.append_raw(dropoff.as_ref(), 1);
+        args.append(&3u64);
+        args.append(&WIRE_REFERRER.to_string());
+        let args = args.out();
+
+        let mut fc = RlpStream::new_list(2);
+        fc.append(&1u8); // RideRequest
+        fc.append_raw(args.as_ref(), 1);
+
+        let tx = sdk_style_tx(WIRE_FROM, 4, fc.out().as_ref());
+        assert!(
+            tx.verify_hash().is_ok(),
+            "node rejected an SDK RideRequest carrying the Hub-API-injected referrer: {:?}",
+            tx.verify_hash()
+        );
+    }
+
+    #[test]
+    fn accepts_sdk_ride_offer_with_injected_referrer() {
+        let mut args = RlpStream::new_list(3);
+        args.append(&"ab".repeat(32));
+        args.append(&3u64);
+        args.append(&WIRE_REFERRER.to_string());
+        let args = args.out();
+
+        let mut fc = RlpStream::new_list(2);
+        fc.append(&2u8); // RideOffer
+        fc.append_raw(args.as_ref(), 1);
+
+        let tx = sdk_style_tx(WIRE_FROM, 5, fc.out().as_ref());
+        assert!(
+            tx.verify_hash().is_ok(),
+            "node rejected an SDK RideOffer carrying the Hub-API-injected referrer: {:?}",
+            tx.verify_hash()
+        );
+    }
 }
