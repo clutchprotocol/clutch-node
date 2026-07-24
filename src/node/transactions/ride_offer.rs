@@ -185,13 +185,14 @@ impl RideOffer {
 
 impl Encodable for RideOffer {
     fn rlp_append(&self, stream: &mut RlpStream) {
-        // Begin an RLP list with three elements: ride_request_transaction_hash, fare, referrer (empty if none)
+        // Begin an RLP list with three elements: ride_request_transaction_hash, fare, referrer
+        // (wire form: no 0x prefix, empty string if none — must match what the SDK signed)
         stream.begin_list(3);
         // Append the ride_request_transaction_hash field
         stream.append(&self.ride_request_transaction_hash);
         // Append the fare field
         stream.append(&self.fare);
-        stream.append(&self.referrer.clone().unwrap_or_default());
+        stream.append(&super::address::referrer_for_rlp(&self.referrer));
     }
 }
 

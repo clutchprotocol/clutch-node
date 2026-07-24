@@ -220,12 +220,13 @@ impl RideRequest {
 
 impl Encodable for RideRequest {
     fn rlp_append(&self, stream: &mut RlpStream) {
-        // Begin an RLP list with four elements: pickup_location, dropoff_location, fare, referrer (empty string if none)
+        // Begin an RLP list with four elements: pickup_location, dropoff_location, fare, referrer
+        // (wire form: no 0x prefix, empty string if none — must match what the SDK signed)
         stream.begin_list(4);
         stream.append(&self.pickup_location);
         stream.append(&self.dropoff_location);
         stream.append(&self.fare);
-        stream.append(&self.referrer.clone().unwrap_or_default());
+        stream.append(&super::address::referrer_for_rlp(&self.referrer));
     }
 }
 

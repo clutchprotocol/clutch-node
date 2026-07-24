@@ -32,3 +32,17 @@ pub fn legacy_account_address_hex(canonical: &str) -> String {
         .unwrap_or(canonical)
         .to_string()
 }
+
+/// Wire form of an optional referrer for RLP: no `0x` prefix, empty string when absent.
+///
+/// The SDK RLP-encodes referrers with the prefix stripped, while `optional_canonical_referrer`
+/// adds it back on decode. `Transaction::verify_hash` recomputes the hash by re-encoding the
+/// decoded transaction, so encoding must strip the prefix again — otherwise the preimage is
+/// longer than the bytes the client signed and every referred ride is rejected as a hash
+/// mismatch. Mirrors the same `0x` stripping `Transaction::calculate_hash` does for `from`.
+pub fn referrer_for_rlp(referrer: &Option<String>) -> String {
+    referrer
+        .as_deref()
+        .map(legacy_account_address_hex)
+        .unwrap_or_default()
+}
