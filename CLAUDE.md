@@ -12,7 +12,7 @@ Rust node implementing Aura (Proof-of-Authority) consensus, custom RLP-encoded t
 | `src/node/node_services.rs` | Spawns the tokio tasks: libp2p server, WebSocket server, 1s block-authoring loop, initial peer sync; Ctrl+C shutdown |
 | `src/node/aura.rs`, `consensus.rs` | Aura impl of the `Consensus` trait: `slot = timestamp / step_duration`, author = `authorities[slot % len]`; `step_duration = 60 / authorities.len()` |
 | `src/node/blocks/block.rs` | Block struct (SHA-256 hash), validation, `add_block_to_chain` (single atomic RocksDB WriteBatch), genesis creation |
-| `src/node/transactions/` | One file per tx type + `transaction.rs` (envelope, SHA3-256 hash, secp256k1 sig), `function_call.rs` (enum), `transaction_pool.rs` (mempool in RocksDB) |
+| `src/node/transactions/` | One file per tx type + `transaction.rs` (envelope, Keccak-256 hash matching the SDK/faucet, secp256k1 sig), `function_call.rs` (enum), `transaction_pool.rs` (mempool in RocksDB) |
 | `src/node/account_state.rs` | Balance/nonce state; `apply_balance_change` returns `StateUpdate` (storage write + optional `BalanceEffect`) |
 | `src/node/balance_effect.rs` | Balance-effect audit records persisted per tx / per block / per account (explorer & RPC consume these) |
 | `src/node/p2p_server/` | libp2p: `server.rs` (swarm, gossipsub + mdns + request-response), `gossipsub_handler.rs` (incoming tx/block), `handshake.rs` + `get_block_header/bodies` (sync protocol), `commands.rs` (mpsc command enum other tasks use to talk to the swarm) |
@@ -71,6 +71,6 @@ docker compose up -d               # 3-node local net from ghcr image (this repo
 - Addresses: canonical form is `0x` + lowercase hex (`src/node/transactions/address.rs`); readers fall back to legacy no-prefix keys (`legacy_account_address_hex`) — preserve that dual-read when touching account state.
 - `Blockchain` is shared as `Arc<Mutex<...>>` (tokio Mutex) across the WS, p2p, authoring, and sync tasks; other tasks talk to the libp2p swarm only through `P2PServerCommand` over an mpsc channel.
 - Gossip payloads are `[1-byte GossipMessageType (0x01 tx, 0x02 block)] + RLP bytes` (`p2p_server/commands.rs`).
-- Transaction hash covers only `(from, nonce, data)` RLP; block hash covers `(index, previous_hash, tx hashes)` — timestamp/author are *not* hashed but the Aura author check uses `block.timestamp`.
+- Transaction hash = **Keccak-256** over RLP `[from (no 0x), nonce, data]` — byte-for-byte identical to clutch-hub-sdk-js `signTransaction` and the clutch-hub-api faucet (pinned by cross-language fixtures in `transaction.rs` tests). `validate_transaction` recomputes and rejects a mismatched `hash` (the hash doubles as a state key, so a forged one could shadow ride state). Block hash covers `(index, previous_hash, tx hashes)` via SHA-256 — timestamp/author are *not* hashed but the Aura author check uses `block.timestamp`.
 - RLP decode of `from` accepts both string (Rust) and raw-bytes (JS SDK) encodings — keep compatibility when touching `rlp_encoding.rs`.
 - Stray `clutch-node-*.db` dirs and `output/*.json` at repo root are test/dev leftovers — safe to delete, don't commit new ones.

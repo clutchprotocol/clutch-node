@@ -7,8 +7,7 @@ use crate::node::{
 
 use rlp::RlpStream;
 use serde::{Deserialize, Serialize};
-use sha2::Digest;
-use sha3::Sha3_256;
+use sha3::{Digest, Keccak256};
 use std::vec;
 
 use super::{function_call::FunctionCall, passenger_concurrent, transfer::Transfer};
@@ -58,22 +57,41 @@ impl Transaction {
         vec![tx1]
     }
 
+    /// Canonical transaction hash. MUST stay byte-for-byte in agreement with the client
+    /// hashing in clutch-hub-sdk-js (`signTransaction`) and clutch-hub-api's faucet:
+    /// Keccak-256 over RLP `[from (no 0x prefix), nonce, data]`. `from` is stripped of any
+    /// `0x` because the SDK RLP-encodes it without the prefix; the node's decoder re-adds the
+    /// prefix, so it must be removed again here for the hash to match.
     fn calculate_hash(&self) -> String {
-        // Serialize only the unsigned transaction (from, nonce, data) using RLP
+        let from_no_prefix = self.from.strip_prefix("0x").unwrap_or(&self.from);
         let mut stream = RlpStream::new();
         stream.begin_list(3);
-        stream.append(&self.from);
+        stream.append(&from_no_prefix.to_string());
         stream.append(&self.nonce);
         stream.append(&self.data);
         let rlp_bytes = stream.out();
 
-        // Initialize the SHA3-256 hasher
-        let mut hasher = Sha3_256::new();
+        let mut hasher = Keccak256::new();
         hasher.update(&rlp_bytes);
-        let result = hasher.finalize();
+        format!("0x{}", hex::encode(hasher.finalize()))
+    }
 
-        // Convert the hash result to a hexadecimal string with "0x" prefix
-        format!("0x{}", hex::encode(result))
+    /// Rejects a transaction whose `hash` field was not honestly derived from
+    /// `(from, nonce, data)`. Without this the hash is attacker-controlled and doubles as a
+    /// storage key (`ride_request_{hash}`, etc.), letting a caller collide/shadow another
+    /// ride's state. Comparison is 0x- and case-insensitive because the wire hash arrives
+    /// without a `0x` prefix while node-built hashes carry one.
+    fn verify_hash(&self) -> Result<(), String> {
+        let claimed = self.hash.strip_prefix("0x").unwrap_or(&self.hash).to_lowercase();
+        let computed = self.calculate_hash();
+        let computed = computed.strip_prefix("0x").unwrap_or(&computed).to_lowercase();
+        if claimed != computed {
+            return Err(format!(
+                "Transaction hash mismatch: claimed '{}', expected '{}'",
+                self.hash, computed
+            ));
+        }
+        Ok(())
     }
 
     #[allow(dead_code)]
@@ -148,6 +166,7 @@ impl Transaction {
     }
 
     pub fn validate_transaction(&self, db: &Database) -> Result<(), String> {
+        self.verify_hash()?;
         self.verify_signature()?;
         self.verify_nonce(db)?;
         self.verify_state(db)?;
@@ -281,6 +300,72 @@ mod tests {
         assert_eq!(
             Transaction::first_duplicate_sender(&[a, a2, b]),
             Some("0xA".to_string())
+        );
+    }
+
+    #[test]
+    fn accepts_sdk_generated_ride_acceptance_hash() {
+        // Fixture: real clutch-hub-sdk-js signTransaction() output for a RideAcceptance.
+        // Pins node calculate_hash byte-for-byte against the SDK's Keccak/RLP encoding.
+        let raw = "f90138a83962366538616666663833323937343363616337336462656638336361336362663961373463323007b84034616630393332613765356263356435643662313065643333613638353861376437333330306131333536646664316137643733333936323932366132613366b840333634383362373936323562326566613037333337616633666638393430623163393936666133663463633035636533656535366434666433323136636436651cb84062643737323039366235663965313038333437316339313137633564653736336363623131666334386535333562366439633631336263306662323763393862f84503f842b84061626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162";
+        let bytes = hex::decode(raw).expect("fixture hex");
+        let tx: Transaction =
+            crate::node::rlp_encoding::decode(&bytes).expect("decode SDK tx");
+        assert!(
+            tx.verify_hash().is_ok(),
+            "node rejected a hash the SDK actually produced: {:?}",
+            tx.verify_hash()
+        );
+        assert_eq!(
+            tx.hash.strip_prefix("0x").unwrap_or(&tx.hash),
+            "bd772096b5f9e1083471c9117c5de763ccb11fc48e535b6d9c613bc0fb27c98b"
+        );
+    }
+
+    #[test]
+    fn accepts_faucet_style_transfer_hash() {
+        // Rebuild a Transfer exactly as clutch-hub-api's faucet does (Rust rlp + Keccak),
+        // then confirm the node recomputes the same hash. Guards the faucet money path.
+        let from_clean = "9b6e8afff8329743cac73dbef83ca3cbf9a74c20";
+        let nonce: u64 = 3;
+        let to = "0x8f19077627cde4848b090c53c83b12956837d5e9";
+        let value: u64 = 100;
+
+        let mut transfer = RlpStream::new_list(2);
+        transfer.append(&to.to_string());
+        transfer.append(&value);
+        let transfer_out = transfer.out();
+
+        let mut fc = RlpStream::new_list(2);
+        fc.append(&0u8);
+        fc.append_raw(transfer_out.as_ref(), 1);
+        let data_rlp = fc.out();
+
+        let mut unsigned = RlpStream::new_list(3);
+        unsigned.append(&from_clean.to_string());
+        unsigned.append(&nonce);
+        unsigned.append_raw(data_rlp.as_ref(), 1);
+        let mut hasher = Keccak256::new();
+        hasher.update(unsigned.out().as_ref());
+        let hash_hex = hex::encode(hasher.finalize());
+
+        let dummy = "cd".repeat(32);
+        let mut full = RlpStream::new_list(7);
+        full.append(&from_clean.to_string());
+        full.append(&nonce);
+        full.append(&dummy);
+        full.append(&dummy);
+        full.append(&28u64);
+        full.append(&hash_hex);
+        full.append_raw(data_rlp.as_ref(), 1);
+        let raw = full.out();
+
+        let tx: Transaction =
+            crate::node::rlp_encoding::decode(raw.as_ref()).expect("decode faucet-style tx");
+        assert!(
+            tx.verify_hash().is_ok(),
+            "node rejected a faucet-style Transfer hash: {:?}",
+            tx.verify_hash()
         );
     }
 }
