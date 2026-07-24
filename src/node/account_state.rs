@@ -32,18 +32,21 @@ impl AccountState {
         }
     }
 
-    fn parse_account_state_value(value: Vec<u8>, canonical: &str) -> AccountState {
-        let account_state_str = String::from_utf8(value).unwrap();
-        let mut account_state: AccountState =
-            serde_json::from_str(&account_state_str).unwrap();
+    fn parse_account_state_value(value: Vec<u8>, canonical: &str) -> Option<AccountState> {
+        let account_state_str = String::from_utf8(value)
+            .map_err(|e| error!("corrupt account_state for {}: not UTF-8: {}", canonical, e))
+            .ok()?;
+        let mut account_state: AccountState = serde_json::from_str(&account_state_str)
+            .map_err(|e| error!("corrupt account_state for {}: {}", canonical, e))
+            .ok()?;
         account_state.public_key = canonical.to_string();
-        account_state
+        Some(account_state)
     }
 
     fn load_account_state(canonical: &str, db: &Database) -> Option<AccountState> {
         let canonical_key = Self::construct_account_state_key(canonical);
         if let Ok(Some(value)) = db.get("state", &canonical_key) {
-            return Some(Self::parse_account_state_value(value, canonical));
+            return Self::parse_account_state_value(value, canonical);
         }
 
         let legacy = legacy_account_address_hex(canonical);
@@ -53,7 +56,7 @@ impl AccountState {
 
         let legacy_key = Self::construct_account_state_key(&legacy);
         if let Ok(Some(value)) = db.get("state", &legacy_key) {
-            return Some(Self::parse_account_state_value(value, canonical));
+            return Self::parse_account_state_value(value, canonical);
         }
 
         None
@@ -119,40 +122,38 @@ impl AccountState {
         }
     }
 
-    fn load_nonce(canonical: &str, db: &Database) -> Option<u64> {
+    fn load_nonce(canonical: &str, db: &Database) -> Result<Option<u64>, String> {
         let canonical_key = Self::construct_account_nonce_key(canonical);
         if let Ok(Some(value)) = db.get("state", &canonical_key) {
-            return Self::parse_nonce_value(value);
+            return Self::parse_nonce_value(value).map(Some);
         }
 
         let legacy = legacy_account_address_hex(canonical);
         if legacy == canonical {
-            return None;
+            return Ok(None);
         }
 
         let legacy_key = Self::construct_account_nonce_key(&legacy);
         if let Ok(Some(value)) = db.get("state", &legacy_key) {
-            return Self::parse_nonce_value(value);
+            return Self::parse_nonce_value(value).map(Some);
         }
 
-        None
+        Ok(None)
     }
 
-    fn parse_nonce_value(value: Vec<u8>) -> Option<u64> {
-        if value.len() == 8 {
-            let bytes_array: [u8; 8] = value.try_into().expect("Slice with incorrect length");
-            Some(u64::from_be_bytes(bytes_array))
-        } else {
-            None
-        }
+    fn parse_nonce_value(value: Vec<u8>) -> Result<u64, String> {
+        // A wrong-length nonce is corruption, not "no nonce". Propagate it as an error
+        // instead of silently returning 0, which would let an old nonce be replayed.
+        let bytes_array: [u8; 8] = value
+            .as_slice()
+            .try_into()
+            .map_err(|_| format!("corrupt nonce value: expected 8 bytes, got {}", value.len()))?;
+        Ok(u64::from_be_bytes(bytes_array))
     }
 
     pub fn get_current_nonce(public_key: &String, db: &Database) -> Result<u64, String> {
         let canonical = canonical_account_address(public_key);
-        match Self::load_nonce(&canonical, db) {
-            Some(nonce) => Ok(nonce),
-            None => Ok(0),
-        }
+        Ok(Self::load_nonce(&canonical, db)?.unwrap_or(0))
     }
 
     fn construct_account_nonce_key(public_key: &str) -> Vec<u8> {
@@ -174,7 +175,15 @@ impl AccountState {
 
 #[cfg(test)]
 mod tests {
-    use super::apply_delta;
+    use super::{apply_delta, AccountState};
+
+    #[test]
+    fn parse_nonce_rejects_corrupt_length() {
+        assert_eq!(AccountState::parse_nonce_value(7u64.to_be_bytes().to_vec()), Ok(7));
+        // Wrong-length bytes are corruption, not nonce 0.
+        assert!(AccountState::parse_nonce_value(vec![1, 2, 3]).is_err());
+        assert!(AccountState::parse_nonce_value(Vec::new()).is_err());
+    }
 
     #[test]
     fn apply_delta_is_checked() {

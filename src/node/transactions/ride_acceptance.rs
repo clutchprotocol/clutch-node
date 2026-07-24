@@ -543,6 +543,9 @@ impl Encodable for RideAcceptance {
 
 impl Decodable for RideAcceptance {
     fn decode(rlp: &Rlp) -> Result<Self, DecoderError> {
+        if !rlp.is_list() || rlp.item_count()? != 1 {
+            return Err(DecoderError::RlpIncorrectListLen);
+        }
         Ok(RideAcceptance {
             ride_offer_transaction_hash: rlp.val_at(0)?,
         })

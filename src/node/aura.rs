@@ -41,6 +41,19 @@ impl Consensus for Aura {
 
     fn verify_block_author(&self, block: &Block) -> Result<(), String> {
         let block_slot = self.slot_at_time(block.timestamp);
+
+        // Bind the block's slot to real time. Without this, an authority can pick any
+        // future timestamp that maps to a slot it owns and author out of turn. Only the
+        // future is bounded (1 slot of clock-skew tolerance); past slots must stay valid
+        // so historical blocks still import during sync.
+        let current_slot = self.current_slot();
+        if block_slot > current_slot.saturating_add(1) {
+            return Err(format!(
+                "Block slot {} is too far ahead of the current slot {}",
+                block_slot, current_slot
+            ));
+        }
+
         let expected_author = self.author_at_slot(block_slot);
 
         if &block.author == expected_author {
@@ -70,5 +83,14 @@ mod tests {
             slot, expected_author
         );
         assert_eq!(aura.current_author(), expected_author);
+    }
+
+    #[test]
+    fn rejects_block_slot_far_in_future() {
+        let aura = Aura::new(vec!["node_1".to_string(), "node_2".to_string()], 20);
+        let mut block = Block::new_block(1, "0".to_string(), vec![]);
+        block.timestamp = u64::MAX; // slot far beyond current_slot + 1
+        block.author = "node_1".to_string();
+        assert!(aura.verify_block_author(&block).is_err());
     }
 }
