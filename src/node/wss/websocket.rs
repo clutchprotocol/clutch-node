@@ -441,23 +441,7 @@ impl WebSocket {
         };
         match blockchain.get_chain_info() {
             Ok((params, total_supply)) => Some(json_rpc_success_response(
-                serde_json::json!({
-                    "chain_id": params.chain_id,
-                    "is_testnet": params.is_testnet,
-                    "tx_fee": params.tx_fee,
-                    "ride_request_referrer_fee_bps": params.ride_request_referrer_fee_bps,
-                    "ride_offer_referrer_fee_bps": params.ride_offer_referrer_fee_bps,
-                    "mint_authority": params.mint_authority,
-                    // Decimal string, not a bare number: total_supply is the one field here
-                    // that can realistically exceed 2^53 (~9.007e15, ~$9B at this peg's 1
-                    // USD = 1,000,000 CLT), where a JSON number rounds silently and the
-                    // treasury's daily reconciliation treats a supply mismatch as a P1 - a
-                    // silent round would fabricate or mask one. The other fields (chain_id,
-                    // tx_fee, both bps rates, latest_block_index) can't approach that bound
-                    // (a block/sec needs ~285M years to get there), so they stay bare numbers.
-                    "total_supply": total_supply.to_string(),
-                    "latest_block_index": latest_index,
-                }),
+                build_chain_info_response(&params, total_supply, latest_index),
                 id,
             )),
             Err(e) => {
@@ -677,4 +661,31 @@ fn json_rpc_success_response(result: serde_json::Value, id: serde_json::Value) -
         "id": id
     })
     .to_string()
+}
+
+// Builds the JSON response body for get_chain_info RPC, ensuring total_supply
+// is encoded as a decimal string (never a bare number) to avoid precision loss
+// past 2^53. Other fields stay as bare numbers.
+pub fn build_chain_info_response(
+    params: &crate::node::transactions::chain_init::ChainInit,
+    total_supply: u64,
+    latest_block_index: usize,
+) -> serde_json::Value {
+    serde_json::json!({
+        "chain_id": params.chain_id,
+        "is_testnet": params.is_testnet,
+        "tx_fee": params.tx_fee,
+        "ride_request_referrer_fee_bps": params.ride_request_referrer_fee_bps,
+        "ride_offer_referrer_fee_bps": params.ride_offer_referrer_fee_bps,
+        "mint_authority": params.mint_authority,
+        // Decimal string, not a bare number: total_supply is the one field here
+        // that can realistically exceed 2^53 (~9.007e15, ~$9B at this peg's 1
+        // USD = 1,000,000 CLT), where a JSON number rounds silently and the
+        // treasury's daily reconciliation treats a supply mismatch as a P1 - a
+        // silent round would fabricate or mask one. The other fields (chain_id,
+        // tx_fee, both bps rates, latest_block_index) can't approach that bound
+        // (a block/sec needs ~285M years to get there), so they stay bare numbers.
+        "total_supply": total_supply.to_string(),
+        "latest_block_index": latest_block_index,
+    })
 }

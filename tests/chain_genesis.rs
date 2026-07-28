@@ -180,30 +180,64 @@ fn chain_info_supply_tracks_mint_and_burn() {
 /// Cross-repo contract pin: the get_chain_info RPC must encode `total_supply` as a
 /// JSON string (it's the one field that can exceed 2^53 and the treasury reconciliation
 /// job treats a rounded value as a P1), while `chain_id` and friends stay bare numbers.
-/// This asserts the same serde_json::json! shape the WS handler builds, since nothing
-/// else here pins the wire encoding and it is exactly the kind of detail that drifts
-/// silently if the handler is ever "simplified" back to a bare number.
+/// Tests the real builder that the WS handler calls, not a mock of it.
 #[test]
 #[serial]
 fn chain_info_json_encodes_total_supply_as_string() {
+    use clutch_node::node::wss::websocket::build_chain_info_response;
+
     let ci = test_chain_init();
     let mut chain = new_test_chain("test-genesis-json-shape", ci.clone());
     let (params, total_supply) = chain.get_chain_info().unwrap();
+    let latest_block_index = match chain.get_latest_block().unwrap() {
+        Some(b) => b.index,
+        None => 0,
+    };
 
-    let response = serde_json::json!({
-        "chain_id": params.chain_id,
-        "total_supply": total_supply.to_string(),
-    });
+    let response = build_chain_info_response(&params, total_supply, latest_block_index);
 
+    // total_supply must be a JSON string to avoid precision loss past 2^53.
     assert!(
         response["total_supply"].is_string(),
-        "total_supply must be a JSON string to avoid precision loss past 2^53"
+        "total_supply must be a JSON string, got: {:?}",
+        response["total_supply"]
     );
-    assert_eq!(response["total_supply"], total_supply.to_string());
+    assert_eq!(
+        response["total_supply"].as_str().unwrap(),
+        &total_supply.to_string(),
+        "total_supply value mismatch"
+    );
+
+    // Other numeric fields must be bare JSON numbers.
     assert!(
         response["chain_id"].is_number(),
-        "chain_id cannot approach 2^53 and should stay a bare number"
+        "chain_id must be a bare JSON number, got: {:?}",
+        response["chain_id"]
     );
+    assert_eq!(response["chain_id"].as_u64().unwrap(), params.chain_id as u64);
+
+    assert!(
+        response["is_testnet"].is_boolean(),
+        "is_testnet must be boolean"
+    );
+    assert_eq!(response["is_testnet"].as_bool().unwrap(), params.is_testnet);
+
+    assert!(
+        response["tx_fee"].is_number(),
+        "tx_fee must be a bare JSON number"
+    );
+    assert_eq!(response["tx_fee"].as_u64().unwrap(), params.tx_fee);
+
+    assert!(
+        response["latest_block_index"].is_number(),
+        "latest_block_index must be a bare JSON number"
+    );
+    assert_eq!(response["latest_block_index"].as_u64().unwrap(), latest_block_index as u64);
+
+    // Ensure all expected fields are present.
+    assert!(response.get("mint_authority").is_some(), "mint_authority missing");
+    assert!(response.get("ride_request_referrer_fee_bps").is_some(), "ride_request_referrer_fee_bps missing");
+    assert!(response.get("ride_offer_referrer_fee_bps").is_some(), "ride_offer_referrer_fee_bps missing");
 
     chain.shutdown_blockchain();
 }
