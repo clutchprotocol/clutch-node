@@ -132,6 +132,9 @@ impl WebSocket {
             "get_block_by_index" => {
                 Self::handle_get_block_by_index(params, id, blockchain).await
             }
+            "get_chain_info" => {
+                Self::handle_get_chain_info(id, blockchain).await
+            }
             "list_ride_requests" => {
                 Self::handle_list_ride_requests(params, id, blockchain).await
             }
@@ -414,6 +417,37 @@ impl WebSocket {
             }
             Err(e) => {
                 let error_msg = format!("Failed to get block by index {}: {}", params.index, e);
+                error!("{}", error_msg);
+                Some(json_rpc_error_response(-32000, &error_msg, id))
+            }
+        }
+    }
+
+    async fn handle_get_chain_info(
+        id: serde_json::Value,
+        blockchain: &Arc<Mutex<Blockchain>>,
+    ) -> Option<String> {
+        let blockchain = blockchain.lock().await;
+        let latest_index = match blockchain.get_latest_block() {
+            Ok(Some(b)) => b.index,
+            _ => 0,
+        };
+        match blockchain.get_chain_info() {
+            Ok((params, total_supply)) => Some(json_rpc_success_response(
+                serde_json::json!({
+                    "chain_id": params.chain_id,
+                    "is_testnet": params.is_testnet,
+                    "tx_fee": params.tx_fee,
+                    "ride_request_referrer_fee_bps": params.ride_request_referrer_fee_bps,
+                    "ride_offer_referrer_fee_bps": params.ride_offer_referrer_fee_bps,
+                    "mint_authority": params.mint_authority,
+                    "total_supply": total_supply,
+                    "latest_block_index": latest_index,
+                }),
+                id,
+            )),
+            Err(e) => {
+                let error_msg = format!("Failed to get chain info: {}", e);
                 error!("{}", error_msg);
                 Some(json_rpc_error_response(-32000, &error_msg, id))
             }

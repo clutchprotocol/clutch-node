@@ -117,3 +117,62 @@ fn wrong_chain_id_rejected_at_pool() {
     assert!(err.contains("does not match chain"), "got: {}", err);
     chain.shutdown_blockchain();
 }
+
+#[test]
+#[serial]
+fn chain_info_supply_tracks_mint_and_burn() {
+    use clutch_node::node::transactions::burn::Burn;
+    use clutch_node::node::transactions::function_call::FunctionCall;
+    use clutch_node::node::transactions::mint::Mint;
+    use clutch_node::node::transactions::transaction::Transaction;
+
+    const AUTHOR_SK: &str = "0883ddd3d07303b87c954b0c9383f7b78f45e002520fc03a8adc80595dbf6509";
+    const FAUCET_SK: &str = "d2c446110cfcecbdf05b2be528e72483de5b6f7ef9c7856df2f81f48e9f2748f";
+    const USER: &str = "0x4444444444444444444444444444444444444444";
+
+    let ci = test_chain_init(); // chain_id 2077, mint_authority = author, testnet
+    let mut chain = new_test_chain("test-supply-e2e", ci.clone());
+
+    let (_, supply_genesis) = chain.get_chain_info().unwrap();
+    assert_eq!(supply_genesis, ci.faucet_allocation);
+
+    // Mint block: +5_000_000 to USER.
+    let mut mint = Transaction::new_transaction(
+        ci.mint_authority.clone(),
+        1,
+        ci.chain_id,
+        FunctionCall::Mint(Mint {
+            to: USER.to_string(),
+            amount: 5_000_000,
+            credit_ref: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+                .to_string(),
+        }),
+    );
+    mint.sign(AUTHOR_SK);
+    chain.add_transaction_to_pool(&mint).unwrap();
+    chain.author_new_block().unwrap();
+
+    let (_, supply_after_mint) = chain.get_chain_info().unwrap();
+    assert_eq!(supply_after_mint, supply_genesis + 5_000_000);
+
+    // Burn block: faucet burns 2_000_000 (fee moves CLT, supply drops by burn only).
+    let mut burn = Transaction::new_transaction(
+        ci.faucet_address.clone(),
+        1,
+        ci.chain_id,
+        FunctionCall::Burn(Burn {
+            amount: 2_000_000,
+            redemption_ref: Some(
+                "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee".to_string(),
+            ),
+        }),
+    );
+    burn.sign(FAUCET_SK);
+    chain.add_transaction_to_pool(&burn).unwrap();
+    chain.author_new_block().unwrap();
+
+    let (_, supply_after_burn) = chain.get_chain_info().unwrap();
+    assert_eq!(supply_after_burn, supply_after_mint - 2_000_000);
+
+    chain.shutdown_blockchain();
+}

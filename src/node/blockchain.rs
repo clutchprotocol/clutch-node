@@ -82,7 +82,6 @@ impl Blockchain {
     }
 
     /// Consensus params + total supply, read from state (post-genesis truth).
-    #[allow(dead_code)] // consumer: Task 8's get_chain_info JSON-RPC method
     pub fn get_chain_info(&self) -> Result<(ChainInit, u64), String> {
         let params = ChainInit::get(&self.db)?;
         let supply = ChainInit::get_total_supply(&self.db)?;
