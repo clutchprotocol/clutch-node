@@ -13,6 +13,7 @@ use super::p2p_server::get_block_header::GetBlockHeaders;
 use super::p2p_server::handshake::Handshake;
 use super::transactions::chain_init::ChainInit;
 use super::transactions::function_call::FunctionCall;
+use super::transactions::mint::Mint;
 use super::transactions::ride_acceptance::RideAcceptance;
 use super::transactions::ride_cancel::RideCancel;
 use super::transactions::ride_offer::RideOffer;
@@ -52,6 +53,11 @@ impl Encodable for FunctionCall {
             FunctionCall::RideCancel(args) => {
                 stream.begin_list(2);
                 stream.append(&5u8); // Tag for RideCancel
+                stream.append(args);
+            }
+            FunctionCall::Mint(args) => {
+                stream.begin_list(2);
+                stream.append(&6u8); // Tag for Mint
                 stream.append(args);
             }
             FunctionCall::RideRequestCancel(args) => {
@@ -100,6 +106,10 @@ impl Decodable for FunctionCall {
             5 => {
                 let args: RideCancel = rlp.val_at(1)?;
                 Ok(FunctionCall::RideCancel(args))
+            }
+            6 => {
+                let args: Mint = rlp.val_at(1)?;
+                Ok(FunctionCall::Mint(args))
             }
             8 => {
                 let args: RideRequestCancel = rlp.val_at(1)?;

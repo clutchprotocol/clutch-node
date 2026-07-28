@@ -9,7 +9,7 @@ use crate::node::balance_effect::{
     persist_block_effects, persist_tx_effects, BalanceEffect, BalanceEffectKind,
 };
 use crate::node::transactions::address::canonical_account_address;
-use crate::node::transactions::chain_init::ChainInit;
+use crate::node::transactions::chain_init::{self, ChainInit};
 use crate::node::transactions::function_call::FunctionCall;
 use crate::node::transactions::transaction::Transaction;
 use crate::node::transactions::transaction_pool::TransactionPool;
@@ -381,6 +381,33 @@ impl Block {
             // Prepare keys for deletion from tx_pool
             let tx_key = TransactionPool::construct_tx_pool_key(&tx.hash);
             tx_keys_to_delete.push(tx_key);
+        }
+
+        // Supply changes once per block: per-tx read-modify-writes of the single
+        // total_supply key would collide in the deferred batch (last write wins,
+        // e.g. two Burns in one block). Sum first, then one read + one write.
+        let mut supply_delta: i128 = 0;
+        for tx in &block.transactions {
+            match &tx.data {
+                FunctionCall::Mint(m) => supply_delta += m.amount as i128,
+                _ => {}
+            }
+        }
+        if block.index > 0 && supply_delta != 0 {
+            let current = ChainInit::get_total_supply(db)? as i128;
+            let next = current + supply_delta;
+            // Cap at i64::MAX, not u64::MAX: supply <= i64::MAX implies every balance
+            // <= i64::MAX, keeping all deltas representable in i64 (Transfer casts
+            // `value as i64` — a balance above i64::MAX would wrap negative on transfer).
+            if next < 0 || next > i64::MAX as i128 {
+                return Err(format!(
+                    "total_supply out of range: {} + {} = {}",
+                    current, supply_delta, next
+                ));
+            }
+            cf_storage.push("state".to_string());
+            keys_storage.push(chain_init::TOTAL_SUPPLY_KEY.to_vec());
+            values_storage.push(serde_json::to_vec(&(next as u64)).expect("serialize supply"));
         }
 
         // Fees replace block rewards: one aggregate author credit per block (single

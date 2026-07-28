@@ -201,8 +201,7 @@ impl Transaction {
     /// Mint is exempt: the treasury authority mints TO users and may itself hold zero
     /// balance. ChainInit is genesis-only. Everything else pays the flat fee.
     fn fee_exempt(&self) -> bool {
-        matches!(&self.data, FunctionCall::ChainInit(_))
-        // Task 6 extends this to: FunctionCall::Mint(_) | FunctionCall::ChainInit(_)
+        matches!(&self.data, FunctionCall::Mint(_) | FunctionCall::ChainInit(_))
     }
 
     /// CLT the sender's balance is directly debited by this tx (excluding the fee).
@@ -266,6 +265,7 @@ impl Transaction {
             }
             FunctionCall::RidePay(ride_pay) => ride_pay.verify_state(&self.from, db),
             FunctionCall::RideCancel(ride_cancel) => ride_cancel.verify_state(&self.from, db),
+            FunctionCall::Mint(mint) => mint.verify_state(&self.from, db),
             FunctionCall::RideRequestCancel(ride_request_cancel) => {
                 ride_request_cancel.verify_state(&self.from, db)
             }
@@ -281,6 +281,7 @@ impl Transaction {
             FunctionCall::RideAcceptance(_) => "RideAcceptance",
             FunctionCall::RidePay(_) => "RidePay",
             FunctionCall::RideCancel(_) => "RideCancel",
+            FunctionCall::Mint(_) => "Mint",
             FunctionCall::RideRequestCancel(_) => "RideRequestCancel",
             FunctionCall::ChainInit(_) => "ChainInit",
         }
@@ -315,6 +316,7 @@ impl Transaction {
             FunctionCall::RideCancel(ride_cancel) => {
                 ride_cancel.state_transaction(&self.from, &self.hash, db, fee)
             }
+            FunctionCall::Mint(mint) => mint.state_transaction(&self.hash, db),
             FunctionCall::RideRequestCancel(ride_request_cancel) => {
                 ride_request_cancel.state_transaction(&self.hash, db)
             }
