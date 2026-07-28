@@ -4,3 +4,6 @@
 
 # Include monitoring configs (they should be in source control)
 # monitoring/
+
+# subagent-driven-development scratch (ledger, briefs, review packages)
+.superpowers/
