@@ -15,9 +15,12 @@ use super::{
 
 /// Referrer fee in base units: floor(fare * bps / 10_000). Stored as basis points so
 /// fractional percentages need no config migration (spec §4a). u128 intermediate —
-/// the product can exceed u64 but the result never does (result <= fare).
+/// the quotient can exceed u64 for bps > 10_000 (100%); split_fare's .min(fare) cap
+/// contains any overflow, and a later task validates the bps range at boot.
 fn referrer_fee_floor(bps: u16, fare: u64) -> u64 {
-    ((fare as u128 * bps as u128) / 10_000) as u64
+    let result = ((fare as u128 * bps as u128) / 10_000) as u64;
+    debug_assert!(result <= fare || bps > 10_000, "result > fare with valid bps (<=10k)");
+    result
 }
 
 /// Split `fare` into (request-referrer fee, offer-referrer fee, driver remainder),
