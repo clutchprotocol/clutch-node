@@ -176,3 +176,34 @@ fn chain_info_supply_tracks_mint_and_burn() {
 
     chain.shutdown_blockchain();
 }
+
+/// Cross-repo contract pin: the get_chain_info RPC must encode `total_supply` as a
+/// JSON string (it's the one field that can exceed 2^53 and the treasury reconciliation
+/// job treats a rounded value as a P1), while `chain_id` and friends stay bare numbers.
+/// This asserts the same serde_json::json! shape the WS handler builds, since nothing
+/// else here pins the wire encoding and it is exactly the kind of detail that drifts
+/// silently if the handler is ever "simplified" back to a bare number.
+#[test]
+#[serial]
+fn chain_info_json_encodes_total_supply_as_string() {
+    let ci = test_chain_init();
+    let mut chain = new_test_chain("test-genesis-json-shape", ci.clone());
+    let (params, total_supply) = chain.get_chain_info().unwrap();
+
+    let response = serde_json::json!({
+        "chain_id": params.chain_id,
+        "total_supply": total_supply.to_string(),
+    });
+
+    assert!(
+        response["total_supply"].is_string(),
+        "total_supply must be a JSON string to avoid precision loss past 2^53"
+    );
+    assert_eq!(response["total_supply"], total_supply.to_string());
+    assert!(
+        response["chain_id"].is_number(),
+        "chain_id cannot approach 2^53 and should stay a bare number"
+    );
+
+    chain.shutdown_blockchain();
+}

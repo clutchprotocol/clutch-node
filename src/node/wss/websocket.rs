@@ -430,7 +430,14 @@ impl WebSocket {
         let blockchain = blockchain.lock().await;
         let latest_index = match blockchain.get_latest_block() {
             Ok(Some(b)) => b.index,
-            _ => 0,
+            // Genuinely empty chain: no block yet, 0 is correct.
+            Ok(None) => 0,
+            // A read failure is not a fresh chain: falling back to 0 here would report
+            // a corrupt/unreadable DB as a healthy freshly-initialized one to the treasury.
+            Err(e) => {
+                warn!("get_chain_info: failed to read latest block: {}", e);
+                0
+            }
         };
         match blockchain.get_chain_info() {
             Ok((params, total_supply)) => Some(json_rpc_success_response(
@@ -441,7 +448,14 @@ impl WebSocket {
                     "ride_request_referrer_fee_bps": params.ride_request_referrer_fee_bps,
                     "ride_offer_referrer_fee_bps": params.ride_offer_referrer_fee_bps,
                     "mint_authority": params.mint_authority,
-                    "total_supply": total_supply,
+                    // Decimal string, not a bare number: total_supply is the one field here
+                    // that can realistically exceed 2^53 (~9.007e15, ~$9B at this peg's 1
+                    // USD = 1,000,000 CLT), where a JSON number rounds silently and the
+                    // treasury's daily reconciliation treats a supply mismatch as a P1 - a
+                    // silent round would fabricate or mask one. The other fields (chain_id,
+                    // tx_fee, both bps rates, latest_block_index) can't approach that bound
+                    // (a block/sec needs ~285M years to get there), so they stay bare numbers.
+                    "total_supply": total_supply.to_string(),
                     "latest_block_index": latest_index,
                 }),
                 id,
