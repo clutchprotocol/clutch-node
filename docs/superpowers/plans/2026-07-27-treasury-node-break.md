@@ -15,8 +15,18 @@
 ## Global Constraints
 
 - **Peg (decided):** 1 USD = 1,000,000 CLT. CLT is the base unit (micro-USD). **Zero decimals. Keep `u64` balances / `i64` deltas.** No i128/u128 in stored state or RLP; wide-integer *intermediates* for overflow-safe arithmetic are fine and used deliberately (Task 1's u128 fee math, Task 6's i128 supply delta). Never floats.
-- **Never run host `cargo build`/`cargo test`** (user convention). All test runs use the Docker image built in Task 1:
-  `docker run --rm -v "${PWD}:/app" -v clutch-cargo-cache:/usr/local/cargo/registry -w /app clutch-node-test cargo test`
+- **Never run host `cargo build`/`cargo test`** (user convention). All test runs use the Docker image built in Task 1, via this exact invocation (call it `RUNTEST` below):
+
+```bash
+MSYS_NO_PATHCONV=1 docker run --rm -v /d/source/clutch/clutch-node:/app -v clutch-cargo-cache:/usr/local/cargo/registry -v clutch-node-target:/app/target -w /app clutch-node-test cargo test
+```
+
+  Three details are load-bearing, learned the hard way:
+  - `MSYS_NO_PATHCONV=1` — without it Git Bash rewrites `-w /app` into `C:/Program Files/Git/app` and docker refuses to start.
+  - `-v clutch-node-target:/app/target` — a **named volume**, not the bind-mounted host `target/`. Compiling into the Windows bind mount is pathologically slow on Docker Desktop (a no-op incremental run exceeded 10 minutes); on the named volume it is seconds. Never drop this flag.
+  - Run it in the **foreground with a generous timeout (600000 ms)**. Do not launch it in the background and poll — polling burns turns and tells you nothing the exit code won't.
+
+  The first run on a cold `clutch-node-target` volume compiles ~200 crates (~15 min). Every run after that is incremental. Narrow the run while iterating (`cargo test --lib ride_pay`, `cargo test --test chain_init`) and run the full suite once before committing.
 - All commands run from repo root `D:\source\clutch\clutch-node` on branch `treasury-break`. **Never push to `main`** — user reviews first (spec §11).
 - Breaking changes are expected (alpha/testnet, DBs get wiped) — no backward-compat shims for state or RLP formats.
 - RLP tags: Transfer=0, RideRequest=1, RideOffer=2, RideAcceptance=3, RidePay=4, RideCancel=5, **Mint=6, Burn=7**, RideRequestCancel=8, **ChainInit=9**. These must byte-match the JS SDK encoder in the follow-up SDK release.
@@ -147,7 +157,7 @@ mod tests {
 - [ ] **Step 4: Run tests to verify they fail**
 
 ```bash
-docker run --rm -v "${PWD}:/app" -v clutch-cargo-cache:/usr/local/cargo/registry -w /app clutch-node-test cargo test --lib ride_pay
+MSYS_NO_PATHCONV=1 docker run --rm -v /d/source/clutch/clutch-node:/app -v clutch-cargo-cache:/usr/local/cargo/registry -v clutch-node-target:/app/target -w /app clutch-node-test cargo test --lib ride_pay
 ```
 
 Expected: FAIL — `referrer_fee_floor` not found.
@@ -189,7 +199,7 @@ Also fix the positional `2, 2` percent literals passed to `Blockchain::new` in `
 - [ ] **Step 7: Run full test suite**
 
 ```bash
-docker run --rm -v "${PWD}:/app" -v clutch-cargo-cache:/usr/local/cargo/registry -w /app clutch-node-test cargo test
+MSYS_NO_PATHCONV=1 docker run --rm -v /d/source/clutch/clutch-node:/app -v clutch-cargo-cache:/usr/local/cargo/registry -v clutch-node-target:/app/target -w /app clutch-node-test cargo test
 ```
 
 Expected: PASS after these test updates:
@@ -321,7 +331,7 @@ fn chain_init_mainnet_flag_zeroes_supply() {
 - [ ] **Step 2: Run to verify failure**
 
 ```bash
-docker run --rm -v "${PWD}:/app" -v clutch-cargo-cache:/usr/local/cargo/registry -w /app clutch-node-test cargo test --test chain_init
+MSYS_NO_PATHCONV=1 docker run --rm -v /d/source/clutch/clutch-node:/app -v clutch-cargo-cache:/usr/local/cargo/registry -v clutch-node-target:/app/target -w /app clutch-node-test cargo test --test chain_init
 ```
 
 Expected: FAIL — module `chain_init` not found.
@@ -507,7 +517,7 @@ pub enum BalanceEffectKind {
 - [ ] **Step 5: Run tests to verify pass**
 
 ```bash
-docker run --rm -v "${PWD}:/app" -v clutch-cargo-cache:/usr/local/cargo/registry -w /app clutch-node-test cargo test --test chain_init
+MSYS_NO_PATHCONV=1 docker run --rm -v /d/source/clutch/clutch-node:/app -v clutch-cargo-cache:/usr/local/cargo/registry -v clutch-node-target:/app/target -w /app clutch-node-test cargo test --test chain_init
 ```
 
 Expected: PASS (4 tests).
@@ -627,7 +637,7 @@ fn mainnet_with_faucet_allocation_fails_loudly() {
 - [ ] **Step 2: Run to verify failure**
 
 ```bash
-docker run --rm -v "${PWD}:/app" -v clutch-cargo-cache:/usr/local/cargo/registry -w /app clutch-node-test cargo test --test chain_genesis
+MSYS_NO_PATHCONV=1 docker run --rm -v /d/source/clutch/clutch-node:/app -v clutch-cargo-cache:/usr/local/cargo/registry -v clutch-node-target:/app/target -w /app clutch-node-test cargo test --test chain_genesis
 ```
 
 Expected: FAIL — `Blockchain::new` arity / `get_chain_info` missing.
@@ -836,7 +846,7 @@ Update every caller to the new signatures (tests use the `new_test_chain` helper
 - [ ] **Step 10: Run full suite**
 
 ```bash
-docker run --rm -v "${PWD}:/app" -v clutch-cargo-cache:/usr/local/cargo/registry -w /app clutch-node-test cargo test
+MSYS_NO_PATHCONV=1 docker run --rm -v /d/source/clutch/clutch-node:/app -v clutch-cargo-cache:/usr/local/cargo/registry -v clutch-node-target:/app/target -w /app clutch-node-test cargo test
 ```
 
 Expected: PASS.
@@ -896,7 +906,7 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 - [ ] **Step 2: Run to verify failure** — `new_transaction` arity error:
 
 ```bash
-docker run --rm -v "${PWD}:/app" -v clutch-cargo-cache:/usr/local/cargo/registry -w /app clutch-node-test cargo test --lib transactions::transaction
+MSYS_NO_PATHCONV=1 docker run --rm -v /d/source/clutch/clutch-node:/app -v clutch-cargo-cache:/usr/local/cargo/registry -v clutch-node-target:/app/target -w /app clutch-node-test cargo test --lib transactions::transaction
 ```
 
 - [ ] **Step 3: Implement**
@@ -1093,7 +1103,7 @@ fn wrong_chain_id_rejected_at_pool() {
 - [ ] **Step 6: Full suite**
 
 ```bash
-docker run --rm -v "${PWD}:/app" -v clutch-cargo-cache:/usr/local/cargo/registry -w /app clutch-node-test cargo test
+MSYS_NO_PATHCONV=1 docker run --rm -v /d/source/clutch/clutch-node:/app -v clutch-cargo-cache:/usr/local/cargo/registry -v clutch-node-target:/app/target -w /app clutch-node-test cargo test
 ```
 
 Expected: PASS.
@@ -1250,7 +1260,7 @@ fn exact_balance_without_fee_is_rejected() {
 - [ ] **Step 2: Run to verify failure**
 
 ```bash
-docker run --rm -v "${PWD}:/app" -v clutch-cargo-cache:/usr/local/cargo/registry -w /app clutch-node-test cargo test --test tx_fee
+MSYS_NO_PATHCONV=1 docker run --rm -v /d/source/clutch/clutch-node:/app -v clutch-cargo-cache:/usr/local/cargo/registry -v clutch-node-target:/app/target -w /app clutch-node-test cargo test --test tx_fee
 ```
 
 Expected: FAIL — balances off by fee amounts / helpers missing.
@@ -1563,7 +1573,7 @@ And the tx loop passes the author: `tx.state_transaction(&db, &params, &block.au
 - [ ] **Step 7: Run full suite**
 
 ```bash
-docker run --rm -v "${PWD}:/app" -v clutch-cargo-cache:/usr/local/cargo/registry -w /app clutch-node-test cargo test
+MSYS_NO_PATHCONV=1 docker run --rm -v /d/source/clutch/clutch-node:/app -v clutch-cargo-cache:/usr/local/cargo/registry -v clutch-node-target:/app/target -w /app clutch-node-test cargo test
 ```
 
 Expected: PASS after substantial test surgery — the fee rule breaks existing ride-flow tests structurally, not just numerically:
@@ -1771,7 +1781,7 @@ fn author_own_tx_pays_no_fee() {
 - [ ] **Step 2: Run to verify failure** — module `mint` not found:
 
 ```bash
-docker run --rm -v "${PWD}:/app" -v clutch-cargo-cache:/usr/local/cargo/registry -w /app clutch-node-test cargo test --test mint_burn
+MSYS_NO_PATHCONV=1 docker run --rm -v /d/source/clutch/clutch-node:/app -v clutch-cargo-cache:/usr/local/cargo/registry -v clutch-node-target:/app/target -w /app clutch-node-test cargo test --test mint_burn
 ```
 
 - [ ] **Step 3: Create `src/node/transactions/mint.rs`**
@@ -1922,7 +1932,7 @@ impl Decodable for Mint {
 - [ ] **Step 6: Run tests**
 
 ```bash
-docker run --rm -v "${PWD}:/app" -v clutch-cargo-cache:/usr/local/cargo/registry -w /app clutch-node-test cargo test --test mint_burn
+MSYS_NO_PATHCONV=1 docker run --rm -v /d/source/clutch/clutch-node:/app -v clutch-cargo-cache:/usr/local/cargo/registry -v clutch-node-target:/app/target -w /app clutch-node-test cargo test --test mint_burn
 ```
 
 Expected: PASS (5 tests).
@@ -2037,7 +2047,7 @@ fn plain_burn_without_ref_works() {
 - [ ] **Step 2: Run to verify failure**
 
 ```bash
-docker run --rm -v "${PWD}:/app" -v clutch-cargo-cache:/usr/local/cargo/registry -w /app clutch-node-test cargo test --test mint_burn
+MSYS_NO_PATHCONV=1 docker run --rm -v /d/source/clutch/clutch-node:/app -v clutch-cargo-cache:/usr/local/cargo/registry -v clutch-node-target:/app/target -w /app clutch-node-test cargo test --test mint_burn
 ```
 
 - [ ] **Step 3: Create `src/node/transactions/burn.rs`**
@@ -2142,7 +2152,7 @@ impl Decodable for Burn {
 - [ ] **Step 5: Run full suite, then commit**
 
 ```bash
-docker run --rm -v "${PWD}:/app" -v clutch-cargo-cache:/usr/local/cargo/registry -w /app clutch-node-test cargo test
+MSYS_NO_PATHCONV=1 docker run --rm -v /d/source/clutch/clutch-node:/app -v clutch-cargo-cache:/usr/local/cargo/registry -v clutch-node-target:/app/target -w /app clutch-node-test cargo test
 ```
 
 ```bash
@@ -2288,7 +2298,7 @@ fn chain_info_supply_tracks_mint_and_burn() {
 - [ ] **Step 3: Run, commit**
 
 ```bash
-docker run --rm -v "${PWD}:/app" -v clutch-cargo-cache:/usr/local/cargo/registry -w /app clutch-node-test cargo test
+MSYS_NO_PATHCONV=1 docker run --rm -v /d/source/clutch/clutch-node:/app -v clutch-cargo-cache:/usr/local/cargo/registry -v clutch-node-target:/app/target -w /app clutch-node-test cargo test
 ```
 
 ```bash
@@ -2330,7 +2340,7 @@ processed_ref_{64-hex},tx hash (exactly-once Mint/Burn ref marker)
 - [ ] **Step 4: Full suite**
 
 ```bash
-docker run --rm -v "${PWD}:/app" -v clutch-cargo-cache:/usr/local/cargo/registry -w /app clutch-node-test cargo test
+MSYS_NO_PATHCONV=1 docker run --rm -v /d/source/clutch/clutch-node:/app -v clutch-cargo-cache:/usr/local/cargo/registry -v clutch-node-target:/app/target -w /app clutch-node-test cargo test
 ```
 
 Expected: PASS, zero ignored failures.
