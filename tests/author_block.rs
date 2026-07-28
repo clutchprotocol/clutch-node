@@ -81,7 +81,8 @@ fn transfer_transaction(nonce: u64, transfer_value: u64) -> Transaction {
 
     let mut transfer_transaction = Transaction::new_transaction(
         FROM_ADDRESS_KEY.to_string(),
-        nonce,        
+        nonce,
+        2077,
         FunctionCall::Transfer(transfer),
     );
     transfer_transaction.sign(FROM_SECRET_KEY);

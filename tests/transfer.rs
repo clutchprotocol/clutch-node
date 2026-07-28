@@ -82,6 +82,7 @@ fn transfer_block(index: usize, nonce: u64, transfer_value: u64) -> Block {
     let mut transfer_transaction = Transaction::new_transaction(
         FROM_ADDRESS_KEY.to_string(),
         nonce,
+        2077,
         FunctionCall::Transfer(Transfer {
             to: TO_ADDRESS_KEY.to_string(),
             value: transfer_value,

@@ -307,6 +307,7 @@ mod tests {
         Transaction::new_transaction(
             from.to_string(),
             nonce,
+            2077,
             FunctionCall::Transfer(Transfer {
                 to: to.to_string(),
                 value: 1,

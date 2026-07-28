@@ -65,6 +65,7 @@ fn ride_pay_emits_referrer_request_fee_effect() {
     let mut ride_request_tx = Transaction::new_transaction(
         PASSENGER.to_string(),
         1,
+        2077,
         FunctionCall::RideRequest(RideRequest {
             fare: 20,
             pickup_location: coordinate::Coordinates {
@@ -90,6 +91,7 @@ fn ride_pay_emits_referrer_request_fee_effect() {
     let mut ride_offer_tx = Transaction::new_transaction(
         DRIVER.to_string(),
         1,
+        2077,
         FunctionCall::RideOffer(RideOffer {
             fare: 20,
             ride_request_transaction_hash: ride_request_hash.clone(),
@@ -108,6 +110,7 @@ fn ride_pay_emits_referrer_request_fee_effect() {
     let mut ride_acceptance_tx = Transaction::new_transaction(
         PASSENGER.to_string(),
         2,
+        2077,
         FunctionCall::RideAcceptance(RideAcceptance {
             ride_offer_transaction_hash: ride_offer_hash.clone(),
         }),
@@ -129,6 +132,7 @@ fn ride_pay_emits_referrer_request_fee_effect() {
     let ride_pay_hash = Transaction::new_transaction(
         PASSENGER.to_string(),
         3,
+        2077,
         FunctionCall::RidePay(ride_pay.clone()),
     )
     .hash;

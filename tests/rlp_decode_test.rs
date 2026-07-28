@@ -94,6 +94,7 @@ fn test_rlp_encode_ride_request_transaction() {
     let mut tx = Transaction::new_transaction(
         PASSENGER_ADDRESS_KEY.to_string(),
         1,
+        2077,
         FunctionCall::RideRequest(ride_request),
     );
     // Sign with passenger's secret key

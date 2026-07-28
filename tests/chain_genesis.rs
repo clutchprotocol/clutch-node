@@ -91,3 +91,29 @@ fn faucet_allocation_over_i64_max_fails_loudly() {
     let ci = ChainInit { faucet_allocation: u64::MAX, ..test_chain_init() };
     let _ = new_test_chain("test-genesis-faucet-overflow", ci);
 }
+
+#[test]
+#[serial]
+fn wrong_chain_id_rejected_at_pool() {
+    use clutch_node::node::transactions::function_call::FunctionCall;
+    use clutch_node::node::transactions::transaction::Transaction;
+    use clutch_node::node::transactions::transfer::Transfer;
+
+    let ci = test_chain_init(); // chain_id 2077
+    let mut chain = new_test_chain("test-wrong-chain", ci.clone());
+
+    let mut tx = Transaction::new_transaction(
+        ci.faucet_address.clone(),
+        1,
+        1, // wrong chain
+        FunctionCall::Transfer(Transfer {
+            to: "0x1111111111111111111111111111111111111111".to_string(),
+            value: 1,
+        }),
+    );
+    tx.sign("d2c446110cfcecbdf05b2be528e72483de5b6f7ef9c7856df2f81f48e9f2748f");
+
+    let err = chain.add_transaction_to_pool(&tx).unwrap_err();
+    assert!(err.contains("chain_id"), "got: {}", err);
+    chain.shutdown_blockchain();
+}

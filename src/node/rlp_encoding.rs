@@ -116,10 +116,10 @@ impl Decodable for FunctionCall {
 
 impl Encodable for Transaction {
     fn rlp_append(&self, stream: &mut RlpStream) {
-        stream.begin_list(7);
-
+        stream.begin_list(8);
         stream.append(&self.from);
         stream.append(&self.nonce);
+        stream.append(&self.chain_id);
         stream.append(&self.signature_r);
         stream.append(&self.signature_s);
         let signature_v_as_u64 = self.signature_v as u64;
@@ -131,39 +131,36 @@ impl Encodable for Transaction {
 
 impl Decodable for Transaction {
     fn decode(rlp: &Rlp) -> Result<Self, DecoderError> {
-        if !rlp.is_list() || rlp.item_count()? != 7 {
+        if !rlp.is_list() || rlp.item_count()? != 8 {
             return Err(DecoderError::RlpIncorrectListLen);
-        }            
-        
+        }
+
         // Handle 'from' field which may be encoded as binary data by JavaScript RLP library
         let from = {
             let from_item = rlp.at(0)?;
             let from_value = if let Ok(string_val) = from_item.as_val::<String>() {
-                // Direct string decoding (from Rust-generated RLP)
                 string_val
             } else if let Ok(bytes_val) = from_item.as_val::<Vec<u8>>() {
-                // Binary data decoding (from JavaScript RLP library)
                 hex::encode(&bytes_val)
             } else {
                 return Err(DecoderError::Custom("Unable to decode 'from' field as string or bytes"));
             };
-            
-            // Ensure 'from' field has 0x prefix
             if from_value.starts_with("0x") {
                 from_value
             } else {
                 format!("0x{}", from_value)
             }
         };
-        
+
         Ok(Transaction {
             from,
             nonce: rlp.val_at(1)?,
-            signature_r: rlp.val_at(2)?,
-            signature_s: rlp.val_at(3)?,
-            signature_v: rlp.val_at::<u64>(4)? as i32,
-            hash: rlp.val_at(5)?,
-            data: rlp.val_at(6)?,
+            chain_id: rlp.val_at(2)?,
+            signature_r: rlp.val_at(3)?,
+            signature_s: rlp.val_at(4)?,
+            signature_v: rlp.val_at::<u64>(5)? as i32,
+            hash: rlp.val_at(6)?,
+            data: rlp.val_at(7)?,
         })
     }
 }
@@ -371,6 +368,7 @@ mod tests {
             from: "0xdeb4cfb63db134698e1879ea24904df074726cc0".to_string(),
             data: function_call,
             nonce: 1,
+            chain_id: 2077,
             signature_r: "3b0cb46ae73d852bb75653ed1f1710676b0b736cd33aefc0c96e6e11417a4c32"
                 .to_string(),
             signature_s: "296086bdc703286c0727c59e07b727cadfc2fe7b9c061149e4a86e726ed23908"
@@ -398,6 +396,7 @@ mod tests {
                 value: 10,
             }),
             nonce: 1,
+            chain_id: 2077,
             signature_r: "3b0cb46ae73d852bb75653ed1f1710676b0b736cd33aefc0c96e6e11417a4c32"
                 .to_string(),
             signature_s: "296086bdc703286c0727c59e07b727cadfc2fe7b9c061149e4a86e726ed23908"
@@ -407,12 +406,13 @@ mod tests {
         };
 
         let tx2 = Transaction {
-            from: "0xabc4cfb63db134698e1879ea24904df074726cc0".to_string(),          
+            from: "0xabc4cfb63db134698e1879ea24904df074726cc0".to_string(),
             data: FunctionCall::Transfer(Transfer {
                 to: "0x1f19077627cde4848b090c53c83b12956837d5e9".to_string(),
                 value: 5,
             }),
             nonce: 2,
+            chain_id: 2077,
             signature_r: "2b0cb46ae73d852bb75653ed1f1710676b0b736cd33aefc0c96e6e11417a4c33"
                 .to_string(),
             signature_s: "396086bdc703286c0727c59e07b727cadfc2fe7b9c061149e4a86e726ed23909"

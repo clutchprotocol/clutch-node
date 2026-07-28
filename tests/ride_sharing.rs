@@ -183,6 +183,7 @@ fn ride_request_transcation(fare: u64, nonce: u64) -> Transaction {
     let mut ride_request_transcation = Transaction::new_transaction(
         PASSENGER_ADDRESS_KEY.to_string(),
         nonce,
+        2077,
         FunctionCall::RideRequest(ride_request),
     );
 
@@ -205,6 +206,7 @@ fn ride_offer_transaction(fare: u64, nonce: u64) -> Transaction {
     let mut ride_offer_transaction = Transaction::new_transaction(
         DRIVER_ADDRESS_KEY.to_string(),
         nonce,
+        2077,
         FunctionCall::RideOffer(ride_offer),
     );
     ride_offer_transaction.sign(DRIVER_SECRET_KEY);
@@ -224,6 +226,7 @@ fn ride_acceptance_transaction(nonce: u64) -> Transaction {
     let mut ride_acceptance_transaction = Transaction::new_transaction(
         PASSENGER_ADDRESS_KEY.to_string(),
         nonce,
+        2077,
         FunctionCall::RideAcceptance(ride_acceptance),
     );
     ride_acceptance_transaction.sign(PASSENGER_SECRET_KEY);
@@ -244,6 +247,7 @@ fn ride_pay_transaction(fare: u64, nonce: u64) -> Transaction {
     let mut ride_pay_transaction = Transaction::new_transaction(
         PASSENGER_ADDRESS_KEY.to_string(),
         nonce,
+        2077,
         FunctionCall::RidePay(ride_pay),
     );
     ride_pay_transaction.sign(PASSENGER_SECRET_KEY);
@@ -263,6 +267,7 @@ fn ride_cancel_transaction(nonce: u64) -> Transaction {
     let mut ride_cancel_transaction = Transaction::new_transaction(
         PASSENGER_ADDRESS_KEY.to_string(),
         nonce,
+        2077,
         FunctionCall::RideCancel(ride_cancel),
     );
 
