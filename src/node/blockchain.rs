@@ -241,7 +241,7 @@ impl Blockchain {
         let index = latest_block.index + 1;
         let previous_hash = latest_block.hash;
         let transactions = match TransactionPool::get_transactions(&self.db) {
-            Ok(transactions) => Self::one_tx_per_sender(transactions),
+            Ok(transactions) => Self::drop_intra_block_conflicts(transactions),
             Err(e) => return Err(format!("Failed to get transactions from pool: {}", e)),
         };
 
@@ -251,16 +251,26 @@ impl Blockchain {
         Ok(new_block)
     }
 
-    /// Keep at most one pending tx per sender — the lowest nonce, tie-broken by hash for
-    /// determinism — so an authored block never contains two txs from the same account.
-    /// `Transaction::validate_transactions` rejects such blocks (deferred-batch staleness
-    /// mints CLT); without this the author would keep drafting a block the pool makes
-    /// invalid and never make progress. Extra same-account txs stay in the pool for later
-    /// blocks. ponytail: one tx/account/block; lift with incremental intra-block state.
-    fn one_tx_per_sender(mut transactions: Vec<Transaction>) -> Vec<Transaction> {
+    /// Authoring-time counterpart to the block-level guards in
+    /// `Transaction::validate_transactions`: drop pending txs that cannot legally share a
+    /// block, keeping at most one per sender (deferred-batch staleness on the balance/nonce
+    /// mints CLT) and at most one per exactly-once ref (two identical `processed_ref_{ref}`
+    /// writes collapse, breaking exactly-once across Mint and Burn). Without this the author
+    /// would keep drafting a block its own validation rejects and never make progress.
+    ///
+    /// Ordering is lowest nonce, tie-broken by hash, so every node keeps the same winner;
+    /// the losers stay in the pool for a later block.
+    /// ponytail: one tx/account/block; lift with incremental intra-block state.
+    fn drop_intra_block_conflicts(mut transactions: Vec<Transaction>) -> Vec<Transaction> {
         transactions.sort_by(|a, b| a.nonce.cmp(&b.nonce).then_with(|| a.hash.cmp(&b.hash)));
-        let mut seen = std::collections::HashSet::new();
-        transactions.retain(|tx| seen.insert(tx.from.clone()));
+        let mut senders = std::collections::HashSet::new();
+        let mut refs = std::collections::HashSet::new();
+        transactions.retain(|tx| {
+            senders.insert(tx.from.clone())
+                && tx
+                    .exactly_once_ref()
+                    .map_or(true, |r| refs.insert(r.to_string()))
+        });
         transactions
     }
 
@@ -315,9 +325,21 @@ mod tests {
         )
     }
 
+    fn burn(from: &str, nonce: u64, redemption_ref: Option<&str>) -> Transaction {
+        Transaction::new_transaction(
+            from.to_string(),
+            nonce,
+            2077,
+            FunctionCall::Burn(crate::node::transactions::burn::Burn {
+                amount: 1,
+                redemption_ref: redemption_ref.map(|r| r.to_string()),
+            }),
+        )
+    }
+
     #[test]
-    fn one_tx_per_sender_keeps_lowest_nonce() {
-        let kept = Blockchain::one_tx_per_sender(vec![
+    fn drops_extra_tx_per_sender_keeping_lowest_nonce() {
+        let kept = Blockchain::drop_intra_block_conflicts(vec![
             tf("0xA", 2, "0xC"),
             tf("0xB", 5, "0xA"),
             tf("0xA", 1, "0xB"),
@@ -329,9 +351,34 @@ mod tests {
     }
 
     #[test]
-    fn one_tx_per_sender_collapses_duplicate_nonce_mint_vector() {
+    fn drops_duplicate_nonce_mint_vector() {
         // Same account, same nonce, different recipients — the double-spend/mint input.
-        let kept = Blockchain::one_tx_per_sender(vec![tf("0xA", 1, "0xB"), tf("0xA", 1, "0xC")]);
+        let kept =
+            Blockchain::drop_intra_block_conflicts(vec![tf("0xA", 1, "0xB"), tf("0xA", 1, "0xC")]);
         assert_eq!(kept.len(), 1, "only one tx per sender survives block building");
+    }
+
+    #[test]
+    fn drops_second_claim_on_an_exactly_once_ref() {
+        // Two *different* senders, so the per-sender filter never fires — but one ref, whose
+        // marker write would collapse in the deferred batch. Without this the author drafts
+        // a block `validate_transactions` then rejects, and never makes progress.
+        let r = "a".repeat(64);
+        let kept = Blockchain::drop_intra_block_conflicts(vec![
+            burn("0xA", 1, Some(&r)),
+            burn("0xB", 1, Some(&r)),
+        ]);
+        assert_eq!(kept.len(), 1, "one claim per ref survives block building");
+    }
+
+    #[test]
+    fn keeps_every_ref_less_burn() {
+        // `None` is the absence of a ref, not a shared one — collapsing these would break
+        // the plain-burn path.
+        let kept = Blockchain::drop_intra_block_conflicts(vec![
+            burn("0xA", 1, None),
+            burn("0xB", 1, None),
+        ]);
+        assert_eq!(kept.len(), 2, "ref-less burns never conflict");
     }
 }

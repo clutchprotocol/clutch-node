@@ -142,12 +142,19 @@ impl Transaction {
         // the last-write-wins batch collapses the two debits into one while both credits
         // land — minting CLT. Until intra-block state is applied incrementally, one tx per
         // account per block is the safe ceiling (the author drains the rest into later
-        // blocks; see `Blockchain::one_tx_per_sender`).
+        // blocks; see `Blockchain::drop_intra_block_conflicts`).
         // ponytail: lift this cap once per-tx state is visible to the next tx in the block.
         if let Some(dup) = Self::first_duplicate_sender(transactions) {
             return Err(format!(
                 "Block contains multiple transactions from the same account '{}'; only one per block is allowed.",
                 dup
+            ));
+        }
+
+        if let Some((reference, from)) = Self::first_duplicate_ref(transactions) {
+            return Err(format!(
+                "Block contains multiple transactions claiming the exactly-once ref '{}' (second from '{}'); a ref may be claimed once.",
+                reference, from
             ));
         }
 
@@ -161,19 +168,58 @@ impl Transaction {
     /// First account that appears more than once in `transactions`, if any. Reads only
     /// `from`, so it's pure/DB-free and unit-testable.
     ///
-    /// This is the same-block exactly-once backstop for Mint: two Mints sharing a
-    /// `credit_ref` in one block are caught here, not by the ref marker (which only
-    /// exists in state *after* the block commits — `verify_state` for both sees
-    /// pre-block state). Canonicalizing (rather than comparing raw `from` strings)
-    /// keeps that guarantee self-contained instead of depending on `SignatureKeys::verify`
-    /// happening to reject case-variant signers elsewhere — a distant invariant, not a
-    /// nonce-ordering nicety.
+    /// This guards balance/nonce staleness only. It is NOT the same-block exactly-once
+    /// backstop, though it was while Mint was the only ref-carrying type: every Mint is
+    /// signed by the single authorized authority, so two same-ref Mints in one block were
+    /// necessarily the same sender and got caught here. Burn is permissionless, so two
+    /// *different* senders can carry one `redemption_ref` — `first_duplicate_ref` is what
+    /// provides the guarantee now, for both types. Canonicalizing (rather than comparing
+    /// raw `from` strings) keeps the account cap self-contained instead of depending on
+    /// `SignatureKeys::verify` happening to reject case-variant signers elsewhere.
     fn first_duplicate_sender(transactions: &[Transaction]) -> Option<String> {
         use super::address::canonical_account_address;
         let mut seen = std::collections::HashSet::new();
         for tx in transactions {
             if !seen.insert(canonical_account_address(&tx.from)) {
                 return Some(tx.from.clone());
+            }
+        }
+        None
+    }
+
+    /// The exactly-once ref this transaction claims, if any: Mint's `credit_ref` (always
+    /// present) or Burn's `redemption_ref` (optional — `None` is the absence of a claim and
+    /// must never collide, including with another `None`). Both write the same
+    /// `processed_ref_{ref}` marker, one namespace across the two types by design.
+    pub(crate) fn exactly_once_ref(&self) -> Option<&str> {
+        match &self.data {
+            FunctionCall::Mint(m) => Some(m.credit_ref.as_str()),
+            FunctionCall::Burn(b) => b.redemption_ref.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// First ref claimed twice in `transactions`, as `(ref, the second claimant's `from`)`.
+    /// Pure/DB-free like `first_duplicate_sender`, and the same kind of backstop.
+    ///
+    /// `verify_state` rejects an already-marked ref, but it reads *committed* state and the
+    /// block's writes only commit at the end of `add_block_to_chain` — so two txs in one
+    /// block bearing one ref both see it unused, both apply, and their two identical marker
+    /// writes collapse to one in the deferred batch. Nothing is minted and the supply delta
+    /// stays right; what breaks is exactly-once, which is the whole point of the field: the
+    /// treasury would see two confirmed on-chain claims on a single off-chain intent.
+    ///
+    /// Comparison is exact, not case-folded, deliberately: the collision being prevented is
+    /// two equal `processed_ref_{ref}` keys, and those keys embed the raw string. A
+    /// case-variant ref is a different key (and is separately rejected by `ref_is_valid`,
+    /// which demands 64 lowercase hex chars), so equality here is precisely the invariant.
+    fn first_duplicate_ref(transactions: &[Transaction]) -> Option<(String, String)> {
+        let mut seen = std::collections::HashSet::new();
+        for tx in transactions {
+            if let Some(reference) = tx.exactly_once_ref() {
+                if !seen.insert(reference) {
+                    return Some((reference.to_string(), tx.from.clone()));
+                }
             }
         }
         None
@@ -431,6 +477,74 @@ mod tests {
         assert!(
             Transaction::first_duplicate_sender(&[a, a_variant]).is_some(),
             "case-variant senders must canonicalize to the same account"
+        );
+    }
+
+    fn burn_tx(from: &str, redemption_ref: Option<&str>) -> Transaction {
+        Transaction::new_transaction(
+            from.to_string(),
+            1,
+            2077,
+            FunctionCall::Burn(super::super::burn::Burn {
+                amount: 1,
+                redemption_ref: redemption_ref.map(|r| r.to_string()),
+            }),
+        )
+    }
+
+    fn mint_tx(from: &str, credit_ref: &str) -> Transaction {
+        Transaction::new_transaction(
+            from.to_string(),
+            1,
+            2077,
+            FunctionCall::Mint(super::super::mint::Mint {
+                to: "0x1".to_string(),
+                amount: 1,
+                credit_ref: credit_ref.to_string(),
+            }),
+        )
+    }
+
+    #[test]
+    fn first_duplicate_ref_catches_two_senders_claiming_one_ref() {
+        // The Burn attack: permissionless senders, so `first_duplicate_sender` returns None
+        // and this is the only thing standing between a pending redemption ref and a second
+        // on-chain claim on it.
+        let r = "a".repeat(64);
+        let alice = burn_tx("0xA", Some(&r));
+        let attacker = burn_tx("0xB", Some(&r));
+        assert_eq!(Transaction::first_duplicate_sender(&[alice.clone(), attacker.clone()]), None);
+        assert_eq!(
+            Transaction::first_duplicate_ref(&[alice, attacker]),
+            Some((r, "0xB".to_string())),
+            "the second claimant is named"
+        );
+    }
+
+    #[test]
+    fn first_duplicate_ref_spans_mint_and_burn() {
+        // One `processed_ref_{ref}` namespace across both types by design.
+        let r = "b".repeat(64);
+        assert!(
+            Transaction::first_duplicate_ref(&[mint_tx("0xA", &r), burn_tx("0xB", Some(&r))])
+                .is_some(),
+            "a Mint and a Burn claiming one ref write the same marker key"
+        );
+    }
+
+    #[test]
+    fn first_duplicate_ref_ignores_absent_refs() {
+        // `None` is no claim at all — two of them must not read as a collision, or every
+        // multi-burn block dies. Distinct refs and non-ref types are likewise fine.
+        assert_eq!(
+            Transaction::first_duplicate_ref(&[
+                burn_tx("0xA", None),
+                burn_tx("0xB", None),
+                tf("0xC", 1, "0xD"),
+                burn_tx("0xE", Some(&"a".repeat(64))),
+                burn_tx("0xF", Some(&"b".repeat(64))),
+            ]),
+            None
         );
     }
 
