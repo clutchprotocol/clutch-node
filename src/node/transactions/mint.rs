@@ -5,7 +5,7 @@ use crate::node::account_state::AccountState;
 use crate::node::balance_effect::{BalanceEffectKind, StateUpdate};
 use crate::node::database::Database;
 
-use super::address::canonical_account_address;
+use super::address::{canonical_account_address, is_valid_address};
 use super::chain_init::ChainInit;
 
 /// Exactly-once ref marker: `processed_ref_{64-hex}` in the state CF, value = tx hash.
@@ -25,17 +25,6 @@ pub fn ref_already_processed(db: &Database, reference: &str) -> Result<bool, Str
         Ok(None) => Ok(false),
         Err(e) => Err(format!("failed to read processed ref: {}", e)),
     }
-}
-
-/// 20-byte-hex address, optional `0x`/`0X` prefix — same shape `canonical_account_address`
-/// normalizes elsewhere. A malformed `to` here would mint into a garbage state key,
-/// permanently inflating `total_supply` against CLT nobody can spend.
-fn is_valid_address(addr: &str) -> bool {
-    let hex_part = addr
-        .strip_prefix("0x")
-        .or_else(|| addr.strip_prefix("0X"))
-        .unwrap_or(addr);
-    hex_part.len() == 40 && hex_part.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -67,6 +56,19 @@ impl Mint {
             return Err(
                 "Mint rejected: amount exceeds i64::MAX (balance deltas are i64)".to_string(),
             );
+        }
+        // Same ceiling `add_block_to_chain` enforces, checked here against committed supply
+        // so the *pool* refuses the mint. A mint that only failed at block application was a
+        // poison pill: pool deletions live in the same uncommitted batch as the state writes,
+        // so the tx survived the failed block, the authoring filter re-included it every
+        // tick, and `author_new_block` failed forever with no eviction path. The block-level
+        // check stays as the backstop for a hostile author.
+        let supply = ChainInit::get_total_supply(db)?;
+        if supply as u128 + self.amount as u128 > i64::MAX as u128 {
+            return Err(format!(
+                "Mint rejected: total_supply out of range: {} + {} exceeds i64::MAX",
+                supply, self.amount
+            ));
         }
         if !ref_is_valid(&self.credit_ref) {
             return Err("Mint rejected: credit_ref must be 64 lowercase hex chars".to_string());

@@ -6,6 +6,7 @@ use clutch_node::node::transactions::chain_init::ChainInit;
 use clutch_node::node::transactions::function_call::FunctionCall;
 use clutch_node::node::transactions::mint::Mint;
 use clutch_node::node::transactions::transaction::Transaction;
+use clutch_node::node::transactions::transfer::Transfer;
 use serial_test::serial;
 
 const AUTHOR_PK: &str = "0x9b6e8afff8329743cac73dbef83ca3cbf9a74c20";
@@ -44,6 +45,17 @@ fn chain(name: &str) -> Blockchain {
         vec![AUTHOR_PK.to_string()],
         ci(),
     )
+}
+
+fn signed_transfer(sk: &str, from: &str, nonce: u64, to: &str, value: u64) -> Transaction {
+    let mut tx = Transaction::new_transaction(
+        from.to_string(),
+        nonce,
+        CHAIN_ID,
+        FunctionCall::Transfer(Transfer { to: to.to_string(), value }),
+    );
+    tx.sign(sk);
+    tx
 }
 
 fn signed_mint(sk: &str, from: &str, nonce: u64, to: &str, amount: u64, credit_ref: &str) -> Transaction {
@@ -128,17 +140,24 @@ fn mint_rejects_amount_over_i64_max() {
 #[test]
 #[serial]
 fn mint_rejects_supply_out_of_range() {
-    // Block-level `total_supply out of range` guard (block.rs) driven through a real
-    // block, not asserted directly: genesis's testnet faucet_allocation (1e15, see `ci()`)
-    // already makes total_supply > 0, so one Mint at the per-tx ceiling (`i64::MAX`, the
-    // largest amount `Mint::verify_state` allows through) pushes
-    // `supply0 + i64::MAX > i64::MAX` and trips the block-level guard on the same tx that
-    // passed per-tx `verify_state` — the two checks are independent and both are needed.
+    // Genesis's testnet faucet_allocation (1e15, see `ci()`) already makes total_supply > 0,
+    // so one Mint at the per-tx ceiling (`i64::MAX`, the largest amount the amount check
+    // allows) pushes `supply0 + i64::MAX > i64::MAX`.
+    //
+    // This must be refused at the POOL, not at block application. When it only failed in
+    // `add_block_to_chain`, the failing block's pool deletions died with its uncommitted
+    // batch: the mint stayed pooled, the authoring filter re-included it every tick, and
+    // `author_new_block` failed forever with no eviction path — one transaction halting
+    // authoring permanently. The block-level check remains as the backstop for a hostile
+    // author, unreachable through the pool now.
     let mut chain = chain("test-mint-supply-range");
     let mint = signed_mint(AUTHOR_SK, AUTHOR_PK, 1, USER, i64::MAX as u64, REF_A);
-    chain.add_transaction_to_pool(&mint).unwrap();
-    let err = chain.author_new_block().unwrap_err();
+    let err = chain.add_transaction_to_pool(&mint).unwrap_err();
     assert!(err.contains("total_supply out of range"), "got: {}", err);
+    assert!(
+        chain.get_transactions_from_pool().unwrap().is_empty(),
+        "the poison mint must not survive in the pool"
+    );
     chain.shutdown_blockchain();
 }
 
@@ -158,7 +177,6 @@ fn mint_works_with_zero_treasury_balance() {
 #[test]
 #[serial]
 fn author_own_tx_pays_no_fee() {
-    use clutch_node::node::transactions::transfer::Transfer;
     // Fund the author via Mint (fee-exempt, single balance write — no deferred-batch
     // collision), then the author sends a transfer in a block it authors itself.
     let mut chain = chain("test-fee-author");
@@ -484,5 +502,150 @@ fn mint_and_burn_sharing_a_ref_cannot_share_a_block() {
 
     let block = chain.author_new_block().unwrap();
     assert_eq!(block.transactions.len(), 1, "authoring keeps one claim on the ref");
+    chain.shutdown_blockchain();
+}
+
+#[test]
+#[serial]
+fn burn_plus_transfer_to_the_burner_cannot_share_a_block() {
+    // The reserve drain, end to end. Both existing guards key on the SENDER, so neither sees
+    // two different senders writing one account — and every `state_transaction` computes its
+    // writes from pre-block state, with the whole block committing as one deferred batch.
+    //
+    // tx0: `Burn{BURNED, redemption_ref}` signed by the burner, nonce 1.
+    // tx1: `Transfer{to: burner, value: 1}` signed by an accomplice, nonce 2.
+    //
+    // Blocks sort by nonce, so the attacker picks the accomplice's nonce to stage its write
+    // LAST: `account_state_burner` commits as `pre + 1`, discarding the burn's debit, while
+    // `total_supply` still falls by BURNED (that delta is summed from the transaction list and
+    // never consults whether the balance write survived) and `processed_ref_{ref}` commits. The
+    // off-chain treasury watcher sees a valid, confirmed, exactly-once burn and pays out
+    // BURNED in USDT. Cost to the attacker: two fees plus 1 CLT, repeatable every block.
+    const BURNED: u64 = 5_000_000;
+    let mut chain = chain("test-burn-drain");
+
+    // Fund the accomplice and spend its nonce 1, so its attack tx can sit at nonce 2 — above
+    // the burn's nonce 1, which is what buys the attacker the last write.
+    let fund = signed_mint(AUTHOR_SK, AUTHOR_PK, 1, SECOND_PK, 1_000_000, REF_A);
+    chain.add_transaction_to_pool(&fund).unwrap();
+    chain.author_new_block().unwrap();
+    let warmup = signed_transfer(SECOND_SK, SECOND_PK, 1, USER, 1);
+    chain.add_transaction_to_pool(&warmup).unwrap();
+    chain.author_new_block().unwrap();
+
+    let faucet_before = chain.get_account_balance(&FAUCET_PK.to_string());
+    let (_, supply0) = chain.get_chain_info().unwrap();
+
+    // Both are individually valid against committed state, so the pool accepts both.
+    let burn = signed_burn(FAUCET_SK, FAUCET_PK, 1, BURNED, Some(REF_B));
+    let accomplice = signed_transfer(SECOND_SK, SECOND_PK, 2, FAUCET_PK, 1);
+    chain.add_transaction_to_pool(&burn).unwrap();
+    chain.add_transaction_to_pool(&accomplice).unwrap();
+
+    // Consensus layer: a block carrying both is invalid however it was assembled.
+    let forged = forged_block(&chain, vec![burn.clone(), accomplice.clone()]);
+    let err = chain.import_block(&forged).unwrap_err();
+    assert!(
+        err.contains(FAUCET_PK),
+        "a block whose transactions write one account must be rejected, naming it: {}",
+        err
+    );
+
+    // Nothing from the rejected block was applied.
+    assert_eq!(
+        chain.get_account_balance(&FAUCET_PK.to_string()),
+        faucet_before,
+        "the rejected block must not have moved the burner's balance"
+    );
+    assert_eq!(chain.get_chain_info().unwrap().1, supply0, "nor total_supply");
+
+    // Pin the guard, not the arithmetic: authoring splits the two across blocks, and once both
+    // have landed the burner is down the full burned amount instead of holding it. If the
+    // guard ever stops firing, this is the assertion that catches the drain itself.
+    assert_eq!(
+        chain.author_new_block().unwrap().transactions.len(),
+        1,
+        "the second writer of the account is deferred, not included"
+    );
+    assert_eq!(chain.author_new_block().unwrap().transactions.len(), 1);
+    assert_eq!(
+        chain.get_account_balance(&FAUCET_PK.to_string()),
+        faucet_before - BURNED - ci().tx_fee + 1,
+        "burner paid the burn and its fee: it does not keep the burned amount"
+    );
+    assert_eq!(
+        chain.get_chain_info().unwrap().1,
+        supply0 - BURNED,
+        "supply fell by exactly the CLT that actually left the burner"
+    );
+    chain.shutdown_blockchain();
+}
+
+#[test]
+#[serial]
+fn two_transfers_to_one_recipient_cannot_share_a_block() {
+    // The benign intersection, same collapse: two senders crediting one recipient, both
+    // computed from pre-block state, so the deferred batch keeps one credit and destroys the
+    // other. Rejection has to be deterministic and the loser has to survive — a guard that
+    // silently dropped it would burn a user's transfer instead of delaying it.
+    const V1: u64 = 7_000;
+    const V2: u64 = 9_000;
+    let mut chain = chain("test-two-credits-one-account");
+
+    let fund = signed_mint(AUTHOR_SK, AUTHOR_PK, 1, SECOND_PK, 1_000_000, REF_A);
+    chain.add_transaction_to_pool(&fund).unwrap();
+    chain.author_new_block().unwrap();
+
+    let t1 = signed_transfer(FAUCET_SK, FAUCET_PK, 1, USER, V1);
+    let t2 = signed_transfer(SECOND_SK, SECOND_PK, 1, USER, V2);
+    chain.add_transaction_to_pool(&t1).unwrap();
+    chain.add_transaction_to_pool(&t2).unwrap();
+
+    let forged = forged_block(&chain, vec![t1.clone(), t2.clone()]);
+    let err = chain.import_block(&forged).unwrap_err();
+    assert!(
+        err.contains(USER),
+        "two credits to one account must be rejected, naming it: {}",
+        err
+    );
+
+    // Authoring layer: one lands, chosen by nonce then hash — identically on every node.
+    let block = chain.author_new_block().unwrap();
+    assert_eq!(block.transactions.len(), 1, "only one writer of the recipient may land");
+    let winner = if t1.hash <= t2.hash { &t1 } else { &t2 };
+    assert_eq!(
+        block.transactions[0].hash, winner.hash,
+        "deterministic winner: lowest nonce, tie-broken by hash"
+    );
+    assert_eq!(
+        chain.get_transactions_from_pool().unwrap().len(),
+        1,
+        "the loser is deferred, not dropped: it stays pooled"
+    );
+
+    // And it lands in the very next block, so neither credit is lost.
+    chain.author_new_block().unwrap();
+    assert_eq!(
+        chain.get_account_balance(&USER.to_string()),
+        V1 + V2,
+        "both credits survive, one block later"
+    );
+    chain.shutdown_blockchain();
+}
+
+#[test]
+#[serial]
+fn transfer_to_malformed_address_rejected() {
+    // `to` is written into the state key verbatim, exactly like Mint's — a malformed one
+    // credits `account_state_{garbage}` that no key can spend, stranding backed CLT and
+    // silently pushing circulating supply below total_supply with no recovery.
+    let mut chain = chain("test-transfer-bad-to");
+    let bad = signed_transfer(FAUCET_SK, FAUCET_PK, 1, "not-an-address", 100);
+    let err = chain.add_transaction_to_pool(&bad).unwrap_err();
+    assert!(err.contains("must be a 20-byte-hex address"), "got: {}", err);
+    // Truncated hex is the likelier client bug and must fail the same way.
+    let short = signed_transfer(FAUCET_SK, FAUCET_PK, 1, "0xdeb4cfb63db134698e1879ea24904df074726c", 100);
+    let err = chain.add_transaction_to_pool(&short).unwrap_err();
+    assert!(err.contains("must be a 20-byte-hex address"), "got: {}", err);
     chain.shutdown_blockchain();
 }

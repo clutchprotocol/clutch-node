@@ -15,6 +15,19 @@ pub fn canonical_account_address(addr: &str) -> String {
     normalize_address_for_compare(addr)
 }
 
+/// The validation half of `canonical_account_address`: 20-byte-hex, optional `0x`/`0X`.
+/// Every type that credits or debits a caller-supplied address must check this first — the
+/// address becomes a state key verbatim, so a malformed one writes `account_state_{garbage}`
+/// that no key can ever spend. Under the redeemable-token model that permanently diverges
+/// `total_supply` from circulating supply (Mint) or strands backed CLT (Transfer).
+pub fn is_valid_address(addr: &str) -> bool {
+    let hex_part = addr
+        .strip_prefix("0x")
+        .or_else(|| addr.strip_prefix("0X"))
+        .unwrap_or(addr);
+    hex_part.len() == 40 && hex_part.chars().all(|c| c.is_ascii_hexdigit())
+}
+
 /// Parse optional referrer from RLP (empty string → None, otherwise canonical `0x` form).
 pub fn optional_canonical_referrer(s: String) -> Option<String> {
     if s.is_empty() {

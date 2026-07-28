@@ -432,11 +432,14 @@ impl WebSocket {
             Ok(Some(b)) => b.index,
             // Genuinely empty chain: no block yet, 0 is correct.
             Ok(None) => 0,
-            // A read failure is not a fresh chain: falling back to 0 here would report
-            // a corrupt/unreadable DB as a healthy freshly-initialized one to the treasury.
+            // A read failure is not a fresh chain: answering 0 with a 200 OK would report a
+            // corrupt/unreadable DB as a healthy freshly-initialized one, and a treasury
+            // reconciliation job would conclude the chain has no blocks. Surface the error,
+            // like the `get_chain_info()` arm below.
             Err(e) => {
-                warn!("get_chain_info: failed to read latest block: {}", e);
-                0
+                let error_msg = format!("Failed to read latest block: {}", e);
+                error!("get_chain_info: {}", error_msg);
+                return Some(json_rpc_error_response(-32000, &error_msg, id));
             }
         };
         match blockchain.get_chain_info() {

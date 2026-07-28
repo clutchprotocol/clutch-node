@@ -240,7 +240,7 @@ impl Blockchain {
         let index = latest_block.index + 1;
         let previous_hash = latest_block.hash;
         let transactions = match TransactionPool::get_transactions(&self.db) {
-            Ok(transactions) => Self::drop_intra_block_conflicts(transactions),
+            Ok(transactions) => Self::drop_intra_block_conflicts(&self.db, transactions),
             Err(e) => return Err(format!("Failed to get transactions from pool: {}", e)),
         };
 
@@ -253,22 +253,40 @@ impl Blockchain {
     /// Authoring-time counterpart to the block-level guards in
     /// `Transaction::validate_transactions`: drop pending txs that cannot legally share a
     /// block, keeping at most one per sender (deferred-batch staleness on the balance/nonce
-    /// mints CLT) and at most one per exactly-once ref (two identical `processed_ref_{ref}`
-    /// writes collapse, breaking exactly-once across Mint and Burn). Without this the author
-    /// would keep drafting a block its own validation rejects and never make progress.
+    /// mints CLT), at most one per exactly-once ref (two identical `processed_ref_{ref}`
+    /// writes collapse, breaking exactly-once across Mint and Burn), and at most one writer
+    /// per account balance (two txs from different senders writing one account collapse the
+    /// same way — the Burn reserve drain). Without this the author would keep drafting a block
+    /// its own validation rejects and never make progress.
     ///
     /// Ordering is lowest nonce, tie-broken by hash, so every node keeps the same winner;
     /// the losers stay in the pool for a later block.
     /// ponytail: one tx/account/block; lift with incremental intra-block state.
-    fn drop_intra_block_conflicts(mut transactions: Vec<Transaction>) -> Vec<Transaction> {
+    fn drop_intra_block_conflicts(
+        db: &Database,
+        mut transactions: Vec<Transaction>,
+    ) -> Vec<Transaction> {
+        use crate::node::transactions::address::canonical_account_address;
         transactions.sort_by(|a, b| a.nonce.cmp(&b.nonce).then_with(|| a.hash.cmp(&b.hash)));
         let mut senders = std::collections::HashSet::new();
         let mut refs = std::collections::HashSet::new();
+        let mut accounts = std::collections::HashSet::new();
         transactions.retain(|tx| {
-            senders.insert(tx.from.clone())
-                && tx
-                    .exactly_once_ref()
-                    .map_or(true, |r| refs.insert(r.to_string()))
+            // Claim the slots only when the tx is actually kept: a dropped tx that had
+            // reserved its sender or its accounts would cascade into dropping innocent txs.
+            let sender = canonical_account_address(&tx.from);
+            let written = tx.written_accounts(db);
+            let keep = !senders.contains(&sender)
+                && tx.exactly_once_ref().map_or(true, |r| !refs.contains(r))
+                && written.iter().all(|a| !accounts.contains(a));
+            if keep {
+                senders.insert(sender);
+                if let Some(r) = tx.exactly_once_ref() {
+                    refs.insert(r.to_string());
+                }
+                accounts.extend(written);
+            }
+            keep
         });
         transactions
     }
@@ -336,13 +354,30 @@ mod tests {
         )
     }
 
+    /// The filter needs a `Database` to resolve RidePay/RideCancel counterparties. None of
+    /// these cases reads state, so any empty DB will do — one per test so they can still run
+    /// in parallel, deleted at the end so re-runs start clean.
+    fn scratch_db(name: &str) -> Database {
+        let _ = std::fs::remove_dir_all(format!("{}.db", name));
+        Database::new_db(name)
+    }
+
+    fn drop_scratch(mut db: Database, name: &str) {
+        db.close();
+        db.delete_database(name).ok();
+    }
+
     #[test]
     fn drops_extra_tx_per_sender_keeping_lowest_nonce() {
-        let kept = Blockchain::drop_intra_block_conflicts(vec![
-            tf("0xA", 2, "0xC"),
-            tf("0xB", 5, "0xA"),
-            tf("0xA", 1, "0xB"),
-        ]);
+        let name = "clutch-node-test-conflicts-sender";
+        let db = scratch_db(name);
+        // Recipients are disjoint from every sender: two senders may share a block only if
+        // no account is written twice, which is a separate guard exercised below.
+        let kept = Blockchain::drop_intra_block_conflicts(
+            &db,
+            vec![tf("0xA", 2, "0xC"), tf("0xB", 5, "0xD"), tf("0xA", 1, "0xC")],
+        );
+        drop_scratch(db, name);
         assert_eq!(kept.len(), 2);
         let a = kept.iter().find(|t| t.from == "0xA").unwrap();
         assert_eq!(a.nonce, 1, "lowest-nonce tx kept per sender");
@@ -352,8 +387,13 @@ mod tests {
     #[test]
     fn drops_duplicate_nonce_mint_vector() {
         // Same account, same nonce, different recipients — the double-spend/mint input.
-        let kept =
-            Blockchain::drop_intra_block_conflicts(vec![tf("0xA", 1, "0xB"), tf("0xA", 1, "0xC")]);
+        let name = "clutch-node-test-conflicts-nonce";
+        let db = scratch_db(name);
+        let kept = Blockchain::drop_intra_block_conflicts(
+            &db,
+            vec![tf("0xA", 1, "0xB"), tf("0xA", 1, "0xC")],
+        );
+        drop_scratch(db, name);
         assert_eq!(kept.len(), 1, "only one tx per sender survives block building");
     }
 
@@ -362,22 +402,45 @@ mod tests {
         // Two *different* senders, so the per-sender filter never fires — but one ref, whose
         // marker write would collapse in the deferred batch. Without this the author drafts
         // a block `validate_transactions` then rejects, and never makes progress.
+        let name = "clutch-node-test-conflicts-ref";
+        let db = scratch_db(name);
         let r = "a".repeat(64);
-        let kept = Blockchain::drop_intra_block_conflicts(vec![
-            burn("0xA", 1, Some(&r)),
-            burn("0xB", 1, Some(&r)),
-        ]);
+        let kept = Blockchain::drop_intra_block_conflicts(
+            &db,
+            vec![burn("0xA", 1, Some(&r)), burn("0xB", 1, Some(&r))],
+        );
+        drop_scratch(db, name);
         assert_eq!(kept.len(), 1, "one claim per ref survives block building");
     }
 
     #[test]
     fn keeps_every_ref_less_burn() {
         // `None` is the absence of a ref, not a shared one — collapsing these would break
-        // the plain-burn path.
-        let kept = Blockchain::drop_intra_block_conflicts(vec![
-            burn("0xA", 1, None),
-            burn("0xB", 1, None),
-        ]);
+        // the plain-burn path. Two burners only ever write their own balances, so the
+        // written-account guard must not fire either.
+        let name = "clutch-node-test-conflicts-plain-burn";
+        let db = scratch_db(name);
+        let kept = Blockchain::drop_intra_block_conflicts(
+            &db,
+            vec![burn("0xA", 1, None), burn("0xB", 1, None)],
+        );
+        drop_scratch(db, name);
         assert_eq!(kept.len(), 2, "ref-less burns never conflict");
+    }
+
+    #[test]
+    fn defers_the_second_writer_of_one_account() {
+        // The reserve-drain shape, at the authoring layer: a Burn by 0xA and a Transfer TO
+        // 0xA from another sender both write `account_state_0xa`. The author must keep one
+        // and leave the other pooled, or it drafts a block its own validation rejects.
+        let name = "clutch-node-test-conflicts-shared-account";
+        let db = scratch_db(name);
+        let kept = Blockchain::drop_intra_block_conflicts(
+            &db,
+            vec![burn("0xA", 1, None), tf("0xB", 2, "0xA")],
+        );
+        drop_scratch(db, name);
+        assert_eq!(kept.len(), 1, "only one writer of 0xA may land");
+        assert_eq!(kept[0].from, "0xA", "lowest nonce wins, deterministically");
     }
 }

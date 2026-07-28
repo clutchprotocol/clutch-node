@@ -158,6 +158,35 @@ impl Transaction {
             ));
         }
 
+        // Both guards above key on the sender, so neither sees the same collapse between two
+        // transactions from *different* senders that write one account. Both compute their
+        // write from pre-block state and the deferred batch keeps the last one staged.
+        //
+        // With Burn that was attacker-profitable: a `Burn{amount, redemption_ref}` from B
+        // plus a `Transfer{to: B, value: 1}` from an accomplice at a higher nonce (blocks
+        // sort by nonce, so the attacker chooses the order) leaves the staged balance at
+        // `pre_B + 1` — B keeps the burned amount and its fee — while `total_supply` still
+        // falls, because the supply delta is summed from the transaction list and never
+        // consults whether the balance write survived, and `processed_ref_{ref}` commits. The
+        // off-chain treasury sees a confirmed, exactly-once burn and pays out against it.
+        // Mint mirrors it: a Transfer to the beneficiary destroys the mint credit while
+        // supply rises and the ref is consumed forever. RideCancel's passenger refund and
+        // RidePay's driver/referrer credits are the same shape.
+        //
+        // ponytail: fail-closed — rejecting is auditable, computing a merged state on a
+        // consensus path is not. The ceiling is real: the default config points every ride at
+        // one configured referrer address, so two RidePay transactions in one block now defer
+        // one of them, a genuine throughput cut on the most common flow. It is still strictly
+        // better than today, which silently destroys one of the two referrer fees. Lift it by
+        // merging staged writes per account inside `add_block_to_chain`'s transaction loop,
+        // generalizing the author-fee merge already there.
+        if let Some(account) = Self::first_shared_written_account(db, transactions) {
+            return Err(format!(
+                "Block contains two transactions writing the balance of account '{}'; only one writer per account per block is allowed.",
+                account
+            ));
+        }
+
         for tx in transactions.iter() {
             tx.validate_transaction(&db)?;
         }
@@ -219,6 +248,104 @@ impl Transaction {
             if let Some(reference) = tx.exactly_once_ref() {
                 if !seen.insert(reference) {
                     return Some((reference.to_string(), tx.from.clone()));
+                }
+            }
+        }
+        None
+    }
+
+    /// Canonical addresses whose `account_state_{addr}` key this transaction writes.
+    ///
+    /// The sibling of `state_transaction`'s balance legs, and it must stay in step with them:
+    /// two transactions naming one account here cannot share a block. Every non-fee-exempt
+    /// type writes its sender (the flat fee — merged in-type for the types that already touch
+    /// the sender, appended by `state_transaction` otherwise); the rest is per-type, resolved
+    /// with the same state lookups the matching `state_transaction` performs.
+    ///
+    /// Deliberately over-approximate, never under: a counterparty is listed whenever it
+    /// exists, without re-deriving the fee split that decides whether its delta is nonzero. An
+    /// unresolvable hash yields a short list, which is sound rather than a hole — the same
+    /// lookup fails in `verify_state` a few lines later and rejects the whole block.
+    pub(crate) fn written_accounts(&self, db: &Database) -> Vec<String> {
+        use super::address::canonical_account_address as canon;
+        use super::{ride_acceptance::RideAcceptance, ride_offer::RideOffer, ride_request::RideRequest};
+
+        let mut accounts = Vec::new();
+        if !self.fee_exempt() {
+            accounts.push(canon(&self.from));
+        }
+        match &self.data {
+            FunctionCall::Transfer(t) => accounts.push(canon(&t.to)),
+            FunctionCall::Mint(m) => accounts.push(canon(&m.to)),
+            FunctionCall::RidePay(p) => {
+                // Driver, request referrer and offer referrer — the accounts RidePay's
+                // `legs` credit, reached by the same acceptance -> offer -> request walk.
+                if let Ok(Some(acceptance)) =
+                    RideAcceptance::get_ride_acceptance(&p.ride_acceptance_transaction_hash, db)
+                {
+                    let offer_hash = &acceptance.ride_offer_transaction_hash;
+                    if let Ok(Some(driver)) = RideOffer::get_from(offer_hash, db) {
+                        accounts.push(canon(&driver));
+                    }
+                    if let Ok(Some(offer)) = RideOffer::get_ride_offer(offer_hash, db) {
+                        if let Some(referrer) = &offer.referrer {
+                            accounts.push(canon(referrer));
+                        }
+                        if let Ok(Some(request)) = RideRequest::get_ride_request(
+                            &offer.ride_request_transaction_hash,
+                            db,
+                        ) {
+                            if let Some(referrer) = &request.referrer {
+                                accounts.push(canon(referrer));
+                            }
+                        }
+                    }
+                }
+            }
+            FunctionCall::RideCancel(c) => {
+                // The refund goes to the passenger, who may or may not be the sender.
+                if let Ok(Some(acceptance)) =
+                    RideAcceptance::get_ride_acceptance(&c.ride_acceptance_transaction_hash, db)
+                {
+                    if let Ok(Some(offer)) =
+                        RideOffer::get_ride_offer(&acceptance.ride_offer_transaction_hash, db)
+                    {
+                        if let Ok(Some(passenger)) =
+                            RideRequest::get_from(&offer.ride_request_transaction_hash, db)
+                        {
+                            accounts.push(canon(&passenger));
+                        }
+                    }
+                }
+            }
+            // Genesis-only, and genesis carries exactly this one transaction.
+            FunctionCall::ChainInit(ci) => accounts.push(canon(&ci.faucet_address)),
+            // Sender only: Burn debits it, and the ride-setup types touch no other balance
+            // (RideAcceptance escrows the fare out of the sender's own balance; the other
+            // three write ride state plus the sender's fee and nothing more).
+            FunctionCall::Burn(_)
+            | FunctionCall::RideRequest(_)
+            | FunctionCall::RideOffer(_)
+            | FunctionCall::RideAcceptance(_)
+            | FunctionCall::RideRequestCancel(_) => {}
+        }
+        // Repeats within one transaction are legal — those writes are netted per address
+        // in-type — so only distinct accounts reach the cross-transaction check.
+        accounts.sort();
+        accounts.dedup();
+        accounts
+    }
+
+    /// First account two transactions in `transactions` both write, if any.
+    fn first_shared_written_account(
+        db: &Database,
+        transactions: &[Transaction],
+    ) -> Option<String> {
+        let mut seen = std::collections::HashSet::new();
+        for tx in transactions {
+            for account in tx.written_accounts(db) {
+                if !seen.insert(account.clone()) {
+                    return Some(account);
                 }
             }
         }
