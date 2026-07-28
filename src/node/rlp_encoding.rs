@@ -139,8 +139,10 @@ impl Decodable for Transaction {
         let from = {
             let from_item = rlp.at(0)?;
             let from_value = if let Ok(string_val) = from_item.as_val::<String>() {
+                // Rust-produced RLP: the address was appended as a hex string (40 ASCII chars).
                 string_val
             } else if let Ok(bytes_val) = from_item.as_val::<Vec<u8>>() {
+                // JS-produced RLP: the SDK appends the address as raw 20 bytes, not a hex string.
                 hex::encode(&bytes_val)
             } else {
                 return Err(DecoderError::Custom("Unable to decode 'from' field as string or bytes"));
@@ -356,6 +358,37 @@ mod tests {
     use crate::node::time_utils::get_current_timespan;
 
     use super::*;
+
+    /// The JS SDK RLP-encodes `from` as raw 20 bytes rather than a 40-char hex string. Every
+    /// other decode fixture in this crate uses the string form, so this is the only test that
+    /// exercises the raw-bytes branch in `Decodable for Transaction` above.
+    #[test]
+    fn decode_transaction_with_raw_bytes_from() {
+        let from_hex = "9b6e8afff8329743cac73dbef83ca3cbf9a74c20";
+        let from_bytes = hex::decode(from_hex).expect("valid hex");
+
+        let function_call = FunctionCall::Transfer(Transfer {
+            to: "0x8f19077627cde4848b090c53c83b12956837d5e9".to_string(),
+            value: 10,
+        });
+        let mut data_stream = RlpStream::new();
+        function_call.rlp_append(&mut data_stream);
+        let data_rlp = data_stream.out();
+
+        let mut stream = RlpStream::new();
+        stream.begin_list(8);
+        stream.append(&from_bytes); // raw bytes, not a hex string
+        stream.append(&1u64);
+        stream.append(&2077u64);
+        stream.append(&"r".to_string());
+        stream.append(&"s".to_string());
+        stream.append(&27u64);
+        stream.append(&"hash".to_string());
+        stream.append_raw(data_rlp.as_ref(), 1);
+
+        let decoded = decode::<Transaction>(&stream.out()).expect("decode raw-bytes from");
+        assert_eq!(decoded.from, format!("0x{}", from_hex));
+    }
 
     #[test]
     fn test_encode_decode_transaction() {

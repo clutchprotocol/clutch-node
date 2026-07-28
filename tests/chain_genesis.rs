@@ -114,6 +114,6 @@ fn wrong_chain_id_rejected_at_pool() {
     tx.sign("d2c446110cfcecbdf05b2be528e72483de5b6f7ef9c7856df2f81f48e9f2748f");
 
     let err = chain.add_transaction_to_pool(&tx).unwrap_err();
-    assert!(err.contains("chain_id"), "got: {}", err);
+    assert!(err.contains("does not match chain"), "got: {}", err);
     chain.shutdown_blockchain();
 }

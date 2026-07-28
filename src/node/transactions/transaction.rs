@@ -82,7 +82,7 @@ impl Transaction {
     }
 
     /// Rejects a transaction whose `hash` field was not honestly derived from
-    /// `(from, nonce, data)`. Without this the hash is attacker-controlled and doubles as a
+    /// `(from, nonce, chain_id, data)`. Without this the hash is attacker-controlled and doubles as a
     /// storage key (`ride_request_{hash}`, etc.), letting a caller collide/shadow another
     /// ride's state. Comparison is 0x- and case-insensitive because the wire hash arrives
     /// without a `0x` prefix while node-built hashes carry one.
@@ -331,10 +331,11 @@ mod tests {
     }
 
     #[test]
-    fn accepts_sdk_generated_ride_acceptance_hash() {
-        // TODO(sdk-v3): re-pin with real clutch-hub-sdk-js output once the SDK adds chain_id.
-        // The old pinned fixture predates chain_id and cannot be regenerated until the SDK
-        // is updated; this builds an equivalent RideAcceptance via sdk_style_tx instead.
+    fn accepts_sdk_style_ride_acceptance_hash() {
+        // TODO(sdk-v3): no test currently pins the node's hashing against externally-produced
+        // (real clutch-hub-sdk-js) bytes. The old pinned fixture predates chain_id and cannot
+        // be regenerated until the SDK adds chain_id; this builds an equivalent RideAcceptance
+        // via sdk_style_tx instead. Re-pin against real SDK output once the SDK supports chain_id.
         let ride_offer_hash = "ab".repeat(32);
         let mut args = RlpStream::new_list(1);
         args.append(&ride_offer_hash);
