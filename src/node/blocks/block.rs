@@ -387,16 +387,15 @@ impl Block {
         // total_supply key would collide in the deferred batch (last write wins,
         // e.g. two Burns in one block). Sum first, then one read + one write.
         //
-        // Today at most one Mint can appear here: one authority key, and
-        // `first_duplicate_sender` allows only one tx per sender per block, so this loop
-        // accumulates over a single entry in practice. It becomes a real multi-entry sum
-        // in Task 7, when Burns from arbitrary users (many distinct senders) can share a
-        // block alongside a Mint.
+        // Mint is limited to one per block (single authority key, and
+        // `first_duplicate_sender` allows only one tx per sender per block), but Burn is
+        // permissionless — several distinct senders can each burn in the same block. This
+        // loop is a real multi-entry sum in that case, alongside at most one Mint.
         let mut supply_delta: i128 = 0;
         for tx in &block.transactions {
             match &tx.data {
                 FunctionCall::Mint(m) => supply_delta += m.amount as i128,
-                // Task 7 adds: FunctionCall::Burn(b) => supply_delta -= b.amount as i128,
+                FunctionCall::Burn(b) => supply_delta -= b.amount as i128,
                 _ => {}
             }
         }

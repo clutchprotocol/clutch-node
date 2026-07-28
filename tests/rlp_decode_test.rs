@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    use clutch_node::node::transactions::burn::Burn;
     use clutch_node::node::transactions::function_call::FunctionCall;
     use clutch_node::node::transactions::mint::Mint;
     use clutch_node::node::transactions::ride_request::RideRequest;
@@ -187,6 +188,69 @@ fn mint_rlp_round_trip_pins_wire_contract() {
             assert_eq!(decoded_mint.credit_ref, mint.credit_ref, "credit_ref must round-trip");
         }
         other => panic!("expected FunctionCall::Mint, got {:?}", other),
+    }
+}
+
+#[test]
+fn burn_rlp_round_trip_pins_wire_contract() {
+    // Burn's encoding is the same kind of cross-repo byte-match contract as Mint (Treasury
+    // Service + JS SDK): tag 7, 2-item arg list `[amount, redemption_ref-or-empty-string]`.
+    // Covers both the redemption case (ref present) and the plain-burn case (ref is None,
+    // which must be the empty string on the wire, not an absent/optional RLP item) so a
+    // sign or arity slip in either direction shows up here.
+    let burn_with_ref = Burn {
+        amount: 2_000_000,
+        redemption_ref: Some("bb".repeat(32)),
+    };
+    let function_call = FunctionCall::Burn(burn_with_ref.clone());
+
+    let mut stream = RlpStream::new();
+    function_call.rlp_append(&mut stream);
+    let encoded = stream.out();
+
+    let rlp = Rlp::new(&encoded);
+    assert!(rlp.is_list(), "FunctionCall wire form must be a list");
+    assert_eq!(rlp.item_count().unwrap(), 2, "FunctionCall wire form is [tag, args]");
+    let tag: u8 = rlp.val_at(0).unwrap();
+    assert_eq!(tag, 7, "Burn's RLP tag must be 7");
+    let args = rlp.at(1).unwrap();
+    assert!(args.is_list(), "Burn args must be a list");
+    assert_eq!(args.item_count().unwrap(), 2, "Burn args must be [amount, redemption_ref]");
+    let ref_on_wire: String = args.val_at(1).unwrap();
+    assert_eq!(ref_on_wire, "bb".repeat(32), "redemption_ref is written as a plain string, not wrapped");
+
+    let decoded = FunctionCall::decode(&Rlp::new(&encoded)).expect("decode Burn FunctionCall");
+    match decoded {
+        FunctionCall::Burn(decoded_burn) => {
+            assert_eq!(decoded_burn.amount, burn_with_ref.amount, "amount must round-trip");
+            assert_eq!(
+                decoded_burn.redemption_ref, burn_with_ref.redemption_ref,
+                "redemption_ref must round-trip"
+            );
+        }
+        other => panic!("expected FunctionCall::Burn, got {:?}", other),
+    }
+
+    // Plain burn: None must serialize as an empty string on the wire and decode back to None.
+    let plain_burn = Burn {
+        amount: 100,
+        redemption_ref: None,
+    };
+    let mut stream = RlpStream::new();
+    FunctionCall::Burn(plain_burn.clone()).rlp_append(&mut stream);
+    let encoded = stream.out();
+
+    let rlp = Rlp::new(&encoded);
+    let args = rlp.at(1).unwrap();
+    let ref_on_wire: String = args.val_at(1).unwrap();
+    assert_eq!(ref_on_wire, "", "None must encode as the empty string, following the referrer convention");
+
+    let decoded = FunctionCall::decode(&Rlp::new(&encoded)).expect("decode plain Burn FunctionCall");
+    match decoded {
+        FunctionCall::Burn(decoded_burn) => {
+            assert_eq!(decoded_burn.redemption_ref, None, "empty string must decode back to None");
+        }
+        other => panic!("expected FunctionCall::Burn, got {:?}", other),
     }
 }
 } 

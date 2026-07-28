@@ -217,7 +217,7 @@ impl Transaction {
     fn sender_direct_debit(&self) -> u64 {
         match &self.data {
             FunctionCall::Transfer(t) => t.value,
-            // Task 7 adds: FunctionCall::Burn(b) => b.amount,
+            FunctionCall::Burn(b) => b.amount,
             _ => 0,
         }
     }
@@ -275,6 +275,7 @@ impl Transaction {
             FunctionCall::RidePay(ride_pay) => ride_pay.verify_state(&self.from, db),
             FunctionCall::RideCancel(ride_cancel) => ride_cancel.verify_state(&self.from, db),
             FunctionCall::Mint(mint) => mint.verify_state(&self.from, db),
+            FunctionCall::Burn(burn) => burn.verify_state(&self.from, db),
             FunctionCall::RideRequestCancel(ride_request_cancel) => {
                 ride_request_cancel.verify_state(&self.from, db)
             }
@@ -291,6 +292,7 @@ impl Transaction {
             FunctionCall::RidePay(_) => "RidePay",
             FunctionCall::RideCancel(_) => "RideCancel",
             FunctionCall::Mint(_) => "Mint",
+            FunctionCall::Burn(_) => "Burn",
             FunctionCall::RideRequestCancel(_) => "RideRequestCancel",
             FunctionCall::ChainInit(_) => "ChainInit",
         }
@@ -326,6 +328,7 @@ impl Transaction {
                 ride_cancel.state_transaction(&self.from, &self.hash, db, fee)
             }
             FunctionCall::Mint(mint) => mint.state_transaction(&self.hash, db),
+            FunctionCall::Burn(burn) => burn.state_transaction(&self.from, &self.hash, db, fee),
             FunctionCall::RideRequestCancel(ride_request_cancel) => {
                 ride_request_cancel.state_transaction(&self.hash, db)
             }
@@ -343,7 +346,7 @@ impl Transaction {
                 | FunctionCall::RideAcceptance(_)
                 | FunctionCall::RideCancel(_)
                 | FunctionCall::RidePay(_)
-            // Task 7 adds: | FunctionCall::Burn(_)
+                | FunctionCall::Burn(_)
         );
         if fee > 0 && !fee_handled_in_type {
             states.push(AccountState::apply_balance_change(

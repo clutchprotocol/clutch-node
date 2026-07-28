@@ -11,6 +11,7 @@ use super::blocks::block_headers::{BlockHeader, BlockHeaders};
 use super::p2p_server::get_block_bodies::GetBlockBodies;
 use super::p2p_server::get_block_header::GetBlockHeaders;
 use super::p2p_server::handshake::Handshake;
+use super::transactions::burn::Burn;
 use super::transactions::chain_init::ChainInit;
 use super::transactions::function_call::FunctionCall;
 use super::transactions::mint::Mint;
@@ -58,6 +59,11 @@ impl Encodable for FunctionCall {
             FunctionCall::Mint(args) => {
                 stream.begin_list(2);
                 stream.append(&6u8); // Tag for Mint
+                stream.append(args);
+            }
+            FunctionCall::Burn(args) => {
+                stream.begin_list(2);
+                stream.append(&7u8); // Tag for Burn
                 stream.append(args);
             }
             FunctionCall::RideRequestCancel(args) => {
@@ -110,6 +116,10 @@ impl Decodable for FunctionCall {
             6 => {
                 let args: Mint = rlp.val_at(1)?;
                 Ok(FunctionCall::Mint(args))
+            }
+            7 => {
+                let args: Burn = rlp.val_at(1)?;
+                Ok(FunctionCall::Burn(args))
             }
             8 => {
                 let args: RideRequestCancel = rlp.val_at(1)?;

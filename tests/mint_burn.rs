@@ -1,4 +1,5 @@
 use clutch_node::node::blockchain::Blockchain;
+use clutch_node::node::transactions::burn::Burn;
 use clutch_node::node::transactions::chain_init::ChainInit;
 use clutch_node::node::transactions::function_call::FunctionCall;
 use clutch_node::node::transactions::mint::Mint;
@@ -184,6 +185,142 @@ fn author_own_tx_pays_no_fee() {
         chain.get_account_balance(&AUTHOR_PK.to_string()),
         10_000 - 100,
         "author's own tx nets zero fee"
+    );
+    chain.shutdown_blockchain();
+}
+
+const REF_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+const TX_FEE: u64 = 1000;
+
+fn signed_burn(sk: &str, from: &str, nonce: u64, amount: u64, redemption_ref: Option<&str>) -> Transaction {
+    let mut tx = Transaction::new_transaction(
+        from.to_string(),
+        nonce,
+        CHAIN_ID,
+        FunctionCall::Burn(Burn {
+            amount,
+            redemption_ref: redemption_ref.map(|s| s.to_string()),
+        }),
+    );
+    tx.sign(sk);
+    tx
+}
+
+#[test]
+#[serial]
+fn burn_reduces_balance_and_supply() {
+    let mut chain = chain("test-burn-ok");
+    let (_, supply0) = chain.get_chain_info().unwrap();
+    let faucet_before = chain.get_account_balance(&FAUCET_PK.to_string());
+    let author_before = chain.get_account_balance(&AUTHOR_PK.to_string());
+
+    let burn = signed_burn(FAUCET_SK, FAUCET_PK, 1, 2_000_000, Some(REF_B));
+    chain.add_transaction_to_pool(&burn).unwrap();
+    chain.author_new_block().unwrap();
+
+    assert_eq!(
+        chain.get_account_balance(&FAUCET_PK.to_string()),
+        faucet_before - 2_000_000 - TX_FEE,
+        "burner pays amount + fee"
+    );
+    let (_, supply1) = chain.get_chain_info().unwrap();
+    assert_eq!(supply1, supply0 - 2_000_000, "supply shrinks by burn amount only (fee just moves)");
+    // The fee moves to the block author rather than being destroyed alongside the burn —
+    // this is what makes the supply delta above "amount only" instead of "amount + fee".
+    assert_eq!(
+        chain.get_account_balance(&AUTHOR_PK.to_string()),
+        author_before + TX_FEE,
+        "burn fee is credited to the block author, not destroyed"
+    );
+    chain.shutdown_blockchain();
+}
+
+#[test]
+#[serial]
+fn duplicate_redemption_ref_rejected() {
+    let mut chain = chain("test-burn-dup");
+    let b1 = signed_burn(FAUCET_SK, FAUCET_PK, 1, 100, Some(REF_B));
+    chain.add_transaction_to_pool(&b1).unwrap();
+    chain.author_new_block().unwrap();
+    let b2 = signed_burn(FAUCET_SK, FAUCET_PK, 2, 100, Some(REF_B));
+    assert!(chain.add_transaction_to_pool(&b2).is_err());
+    chain.shutdown_blockchain();
+}
+
+#[test]
+#[serial]
+fn burn_more_than_balance_rejected() {
+    let mut chain = chain("test-burn-overdraw");
+    let balance = chain.get_account_balance(&FAUCET_PK.to_string());
+    let burn = signed_burn(FAUCET_SK, FAUCET_PK, 1, balance, None); // no headroom for fee
+    assert!(chain.add_transaction_to_pool(&burn).is_err());
+    chain.shutdown_blockchain();
+}
+
+#[test]
+#[serial]
+fn plain_burn_without_ref_works() {
+    let mut chain = chain("test-burn-plain");
+    let burn = signed_burn(FAUCET_SK, FAUCET_PK, 1, 100, None);
+    chain.add_transaction_to_pool(&burn).unwrap();
+    chain.author_new_block().unwrap();
+    chain.shutdown_blockchain();
+}
+
+#[test]
+#[serial]
+fn two_burns_from_different_senders_in_one_block_reduce_supply_by_sum() {
+    // The block-level supply accumulation loop (block.rs) has never actually accumulated:
+    // Mint is one-per-block (single authority, one tx per sender per block), but Burns come
+    // from arbitrary users, so several can share a block. This is the first real exercise of
+    // that loop with more than one entry — a wrong sign or a deferred-batch collision on
+    // either burner's balance write would show up here and nowhere else.
+    let mut chain = chain("test-burn-two-senders");
+    let (_, supply0) = chain.get_chain_info().unwrap();
+
+    // Second sender: DRIVER, a genuinely distinct matched keypair already used elsewhere
+    // in this suite (tests/balance_effects.rs) — the address is derived from the secret
+    // key via secp256k1, so it can't be picked independently of it.
+    let second_user = "0x8f19077627cde4848b090c53c83b12956837d5e9";
+    let second_sk = "e74e3f87268132c7b3ddb24600716fc362f4519bf9986a9436aa8a1be58c7150";
+
+    // Fund the second sender via Mint (fee-exempt authority credit, single balance write).
+    let fund = signed_mint(
+        AUTHOR_SK, AUTHOR_PK, 1, second_user, 1_000_000,
+        "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    );
+    chain.add_transaction_to_pool(&fund).unwrap();
+    chain.author_new_block().unwrap();
+
+    let faucet_before = chain.get_account_balance(&FAUCET_PK.to_string());
+    let second_before = chain.get_account_balance(&second_user.to_string());
+    assert_eq!(second_before, 1_000_000);
+
+    // Two Burns from two distinct senders, same block. Both are first-ever txs from their
+    // sender in this fresh chain (the funding Mint above was sent by AUTHOR_PK, not either
+    // burner), so both start at nonce 1.
+    let burn_faucet = signed_burn(FAUCET_SK, FAUCET_PK, 1, 300_000, None);
+    let burn_second = signed_burn(second_sk, second_user, 1, 400_000, None);
+    chain.add_transaction_to_pool(&burn_faucet).unwrap();
+    chain.add_transaction_to_pool(&burn_second).unwrap();
+    chain.author_new_block().unwrap();
+
+    assert_eq!(
+        chain.get_account_balance(&FAUCET_PK.to_string()),
+        faucet_before - 300_000 - TX_FEE,
+        "faucet burner pays amount + fee"
+    );
+    assert_eq!(
+        chain.get_account_balance(&second_user.to_string()),
+        second_before - 400_000 - TX_FEE,
+        "second burner pays amount + fee"
+    );
+
+    let (_, supply1) = chain.get_chain_info().unwrap();
+    assert_eq!(
+        supply1,
+        supply0 + 1_000_000 - 300_000 - 400_000,
+        "supply reflects the mint plus both burns summed, not last-write-wins"
     );
     chain.shutdown_blockchain();
 }
