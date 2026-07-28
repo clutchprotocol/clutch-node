@@ -25,26 +25,26 @@ impl Transfer {
         Ok(())
     }
 
-    pub fn state_transaction(&self, from: &String, db: &Database) -> Vec<StateUpdate> {
+    pub fn state_transaction(&self, from: &String, db: &Database, fee: u64) -> Vec<StateUpdate> {
         let transfer_value: i64 = self.value as i64;
         let to = self.to.clone();
 
-        vec![
-            AccountState::apply_balance_change(
-                from,
-                -transfer_value,
-                BalanceEffectKind::TransferOut,
-                Some(to.clone()),
-                db,
-            ),
-            AccountState::apply_balance_change(
-                &to,
-                transfer_value,
-                BalanceEffectKind::TransferIn,
-                Some(from.clone()),
-                db,
-            ),
-        ]
+        let mut updates = AccountState::apply_balance_change_with_fee(
+            from,
+            -transfer_value,
+            fee,
+            BalanceEffectKind::TransferOut,
+            Some(to.clone()),
+            db,
+        );
+        updates.push(AccountState::apply_balance_change(
+            &to,
+            transfer_value,
+            BalanceEffectKind::TransferIn,
+            Some(from.clone()),
+            db,
+        ));
+        updates
     }
 }
 

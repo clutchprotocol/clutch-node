@@ -150,7 +150,6 @@ pub fn persist_tx_effects(
     writes
 }
 
-#[allow(dead_code)] // consumer: Task 5's fee credit re-adds the caller in block.rs
 pub fn persist_block_effects(
     block_height: u64,
     timestamp: u64,

@@ -2,9 +2,10 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tracing::{error, info, warn};
 
+use crate::node::account_state::AccountState;
 use crate::node::database::Database;
 use crate::node::time_utils::get_current_timespan;
-use crate::node::balance_effect::persist_tx_effects;
+use crate::node::balance_effect::{persist_block_effects, persist_tx_effects, BalanceEffectKind};
 use crate::node::transactions::chain_init::ChainInit;
 use crate::node::transactions::function_call::FunctionCall;
 use crate::node::transactions::transaction::Transaction;
@@ -345,7 +346,7 @@ impl Block {
 
         // Handle transactions State
         for (tx_index, tx) in block.transactions.iter().enumerate() {
-            let updates = tx.state_transaction(&db, &params);
+            let updates = tx.state_transaction(&db, &params, &block.author);
 
             let mut tx_effects = Vec::new();
             for update in updates {
@@ -377,6 +378,45 @@ impl Block {
             // Prepare keys for deletion from tx_pool
             let tx_key = TransactionPool::construct_tx_pool_key(&tx.hash);
             tx_keys_to_delete.push(tx_key);
+        }
+
+        // Fees replace block rewards: one aggregate author credit per block (single
+        // write — per-tx credits would collide in the deferred batch). Fee revenue is
+        // backed CLT changing hands, so the reserve invariant is untouched.
+        // ponytail: residual ceiling (pre-existing class, same as the old block reward):
+        // if any tx in a fee-paying block ALSO credits the author's balance (Transfer to
+        // author, Mint to author, author-as-driver RidePay), that credit collides with
+        // this write and is lost. Operational rule: validator accounts are not app
+        // accounts. Lift with incremental intra-block state.
+        let total_fees: u64 = block
+            .transactions
+            .iter()
+            .map(|tx| tx.effective_fee(&block.author, &params))
+            .sum();
+        if block.index > 0 && total_fees > 0 {
+            let fee_update = AccountState::apply_balance_change(
+                &block.author,
+                total_fees as i64,
+                BalanceEffectKind::TxFeeEarned,
+                None,
+                &db,
+            );
+            if let Some((key, value)) = fee_update.storage {
+                cf_storage.push("state".to_string());
+                keys_storage.push(key);
+                values_storage.push(value);
+            }
+            if let Some(effect) = fee_update.effect {
+                for (key, value) in persist_block_effects(
+                    block.index as u64,
+                    block.timestamp,
+                    std::slice::from_ref(&effect),
+                ) {
+                    cf_storage.push("state".to_string());
+                    keys_storage.push(key);
+                    values_storage.push(value);
+                }
+            }
         }
 
         // Prepare operations for database write

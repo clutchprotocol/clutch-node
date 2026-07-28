@@ -120,7 +120,10 @@ fn ride_pay_emits_referrer_request_fee_effect() {
     if let FunctionCall::RideAcceptance(ride_acceptance) = &ride_acceptance_tx.data {
         apply_state_updates(
             &db,
-            ride_acceptance.state_transaction(&PASSENGER.to_string(), &ride_acceptance_hash, &db),
+            // No fee flows through this test — it drives per-type state_transaction directly
+            // and asserts only the downstream RidePay referrer effect, not the passenger's
+            // post-acceptance balance.
+            ride_acceptance.state_transaction(&PASSENGER.to_string(), &ride_acceptance_hash, &db, 0),
         );
     }
 

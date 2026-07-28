@@ -122,6 +122,46 @@ impl AccountState {
         }
     }
 
+    /// Sender leg with fee merged into ONE balance write and two audit effects.
+    /// Two separate apply_balance_change calls on the same account within a tx would
+    /// each read pre-block state and the deferred batch keeps only the last write —
+    /// silently dropping one debit. One write, split effects, no collision.
+    pub fn apply_balance_change_with_fee(
+        public_key: &String,
+        main_delta: i64,
+        fee: u64,
+        kind: BalanceEffectKind,
+        counterparty: Option<String>,
+        db: &Database,
+    ) -> Vec<StateUpdate> {
+        if fee == 0 {
+            return vec![Self::apply_balance_change(public_key, main_delta, kind, counterparty, db)];
+        }
+        let canonical = canonical_account_address(public_key);
+        let combined = main_delta - fee as i64;
+        let (key, value) = Self::update_account_state_key(public_key, combined, db);
+        vec![
+            StateUpdate {
+                storage: Some((key, value)),
+                effect: Some(BalanceEffect {
+                    address: canonical.clone(),
+                    delta: main_delta,
+                    kind,
+                    counterparty,
+                }),
+            },
+            StateUpdate {
+                storage: None, // effect-only: storage already carries the combined write
+                effect: Some(BalanceEffect {
+                    address: canonical,
+                    delta: -(fee as i64),
+                    kind: BalanceEffectKind::TxFeePaid,
+                    counterparty: None,
+                }),
+            },
+        ]
+    }
+
     fn load_nonce(canonical: &str, db: &Database) -> Result<Option<u64>, String> {
         let canonical_key = Self::construct_account_nonce_key(canonical);
         if let Ok(Some(value)) = db.get("state", &canonical_key) {

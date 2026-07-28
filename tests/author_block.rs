@@ -66,8 +66,9 @@ fn author_block() {
 
     let author_account_state = blockchain.get_account_state(&AUTHOR_PUBLIC_KEY.to_string());
     assert_eq!(
-        author_account_state.balance, 0,
-        "block rewards are removed — author gets nothing for authoring",
+        author_account_state.balance, ci().tx_fee,
+        "block rewards are removed, but the author now earns the flat tx fee \
+         from the one non-exempt Transfer authored in this block",
     );
 
     blockchain.shutdown_blockchain();

@@ -1,6 +1,6 @@
 use crate::node::{
     account_state::AccountState,
-    balance_effect::StateUpdate,
+    balance_effect::{BalanceEffectKind, StateUpdate},
     database::Database,
     signature_keys::{self, SignatureKeys},
 };
@@ -180,9 +180,52 @@ impl Transaction {
                 self.chain_id, params.chain_id
             ));
         }
+        if !self.fee_exempt() {
+            let required = self
+                .sender_direct_debit()
+                .checked_add(params.tx_fee)
+                .ok_or("Verification failed: amount + fee overflows u64")?;
+            let balance = AccountState::get_current_state(&self.from, db).balance;
+            if balance < required {
+                return Err(format!(
+                    "Verification failed: insufficient balance for amount + fee. Required: {}, available: {}",
+                    required, balance
+                ));
+            }
+        }
         self.verify_nonce(db)?;
         self.verify_state(db)?;
         Ok(())
+    }
+
+    /// Mint is exempt: the treasury authority mints TO users and may itself hold zero
+    /// balance. ChainInit is genesis-only. Everything else pays the flat fee.
+    fn fee_exempt(&self) -> bool {
+        matches!(&self.data, FunctionCall::ChainInit(_))
+        // Task 6 extends this to: FunctionCall::Mint(_) | FunctionCall::ChainInit(_)
+    }
+
+    /// CLT the sender's balance is directly debited by this tx (excluding the fee).
+    fn sender_direct_debit(&self) -> u64 {
+        match &self.data {
+            FunctionCall::Transfer(t) => t.value,
+            // Task 7 adds: FunctionCall::Burn(b) => b.amount,
+            _ => 0,
+        }
+    }
+
+    /// ponytail: author's own tx nets zero fee — a debit and an aggregate credit on the
+    /// same account in one block collide in the deferred batch (last write wins), so we
+    /// skip both sides instead. Lift with incremental intra-block state.
+    pub fn effective_fee(&self, block_author: &str, params: &ChainInit) -> u64 {
+        use crate::node::transactions::address::canonical_account_address;
+        if self.fee_exempt()
+            || canonical_account_address(&self.from) == canonical_account_address(block_author)
+        {
+            0
+        } else {
+            params.tx_fee
+        }
     }
 
     fn verify_nonce(&self, db: &Database) -> Result<bool, String> {
@@ -243,9 +286,15 @@ impl Transaction {
         }
     }
 
-    pub fn state_transaction(&self, db: &Database, params: &ChainInit) -> Vec<StateUpdate> {
+    pub fn state_transaction(
+        &self,
+        db: &Database,
+        params: &ChainInit,
+        block_author: &str,
+    ) -> Vec<StateUpdate> {
+        let fee = self.effective_fee(block_author, params);
         let mut states = match &self.data {
-            FunctionCall::Transfer(transfer) => transfer.state_transaction(&self.from, db),
+            FunctionCall::Transfer(transfer) => transfer.state_transaction(&self.from, db, fee),
             FunctionCall::RideRequest(ride_request) => {
                 ride_request.state_transaction(&self.from, &self.hash, db)
             }
@@ -253,7 +302,7 @@ impl Transaction {
                 ride_offer.state_transaction(&self.from, &self.hash, db)
             }
             FunctionCall::RideAcceptance(ride_acceptance) => {
-                ride_acceptance.state_transaction(&self.from, &self.hash, db)
+                ride_acceptance.state_transaction(&self.from, &self.hash, db, fee)
             }
             FunctionCall::RidePay(ride_pay) => ride_pay.state_transaction(
                 &self.hash,
@@ -262,12 +311,35 @@ impl Transaction {
                 params.ride_offer_referrer_fee_bps,
                 &self.from,
             ),
-            FunctionCall::RideCancel(ride_cancel) => ride_cancel.state_transaction(&self.hash, db),
+            FunctionCall::RideCancel(ride_cancel) => {
+                ride_cancel.state_transaction(&self.from, &self.hash, db, fee)
+            }
             FunctionCall::RideRequestCancel(ride_request_cancel) => {
                 ride_request_cancel.state_transaction(&self.hash, db)
             }
             FunctionCall::ChainInit(chain_init) => chain_init.state_transaction(db),
         };
+
+        // Standalone fee debit ONLY for types that never write the sender's balance
+        // in-type (see routing table). Types that do (Transfer, Burn, RideAcceptance,
+        // RideCancel) merge the fee themselves — two writes to one account key in a tx
+        // collide in the deferred batch (last write wins).
+        let fee_handled_in_type = matches!(
+            &self.data,
+            FunctionCall::Transfer(_)
+                | FunctionCall::RideAcceptance(_)
+                | FunctionCall::RideCancel(_)
+            // Task 7 adds: | FunctionCall::Burn(_)
+        );
+        if fee > 0 && !fee_handled_in_type {
+            states.push(AccountState::apply_balance_change(
+                &self.from,
+                -(fee as i64),
+                BalanceEffectKind::TxFeePaid,
+                None,
+                db,
+            ));
+        }
 
         match AccountState::increase_account_nonce_key(&self.from, db) {
             Ok((nonce_key, nonce_serialized)) => {

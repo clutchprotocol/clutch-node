@@ -77,12 +77,17 @@ impl RideAcceptance {
                 ));
             }
 
+            let tx_fee = crate::node::transactions::chain_init::ChainInit::get(db)?.tx_fee;
+            let required = ride_offer
+                .fare
+                .checked_add(tx_fee)
+                .ok_or("fare + fee overflows u64")?;
             let passenger_account_state = AccountState::get_current_state(from, db);
-            if &passenger_account_state.balance < &ride_offer.fare {
+            if passenger_account_state.balance < required {
                 return Err(format!(
-                    "The account balance is insufficient to cover the fare for the requested ride. \
-                     Account balance is: {}, fare: {}",
-                    passenger_account_state.balance, ride_offer.fare
+                    "The account balance is insufficient to cover the fare plus the transaction fee. \
+                     Account balance is: {}, fare: {}, fee: {}",
+                    passenger_account_state.balance, ride_offer.fare, tx_fee
                 ));
             }
 
@@ -129,6 +134,7 @@ impl RideAcceptance {
         from: &String,
         tx_hash: &String,
         db: &Database,
+        fee: u64,
     ) -> Vec<StateUpdate> {
         let ride_acceptance_tx_hash = &tx_hash;
         let ride_offer_tx_hash = &self.ride_offer_transaction_hash;
@@ -156,20 +162,25 @@ impl RideAcceptance {
             .unwrap();
 
         let transfer_value: i64 = ride_offer.fare as i64;
-        let passenger_update = AccountState::apply_balance_change(
+        // ponytail: fee merged into the single escrow write — a separate TxFeePaid write
+        // on the same account would collide in the deferred batch. Lift with
+        // incremental intra-block state.
+        let passenger_updates = AccountState::apply_balance_change_with_fee(
             from,
             -transfer_value,
+            fee,
             BalanceEffectKind::RideAcceptanceDebit,
             None,
             db,
         );
 
-        vec![
+        let mut updates = vec![
             StateUpdate::storage_only(ride_acceptance_key, ride_acceptance_value),
             StateUpdate::storage_only(ride_request_acceptance_key, ride_request_acceptance_value),
             StateUpdate::storage_only(ride_offer_acceptance_key, ride_offer_acceptance_value),
-            passenger_update,
-        ]
+        ];
+        updates.extend(passenger_updates);
+        updates
     }
 
     pub fn get_ride_acceptance(
