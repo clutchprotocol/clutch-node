@@ -13,6 +13,10 @@ pub enum BalanceEffectKind {
     ReferrerOfferFee,
     RideCancelRefund,
     BlockReward,
+    Mint,
+    Burn,
+    TxFeePaid,
+    TxFeeEarned,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

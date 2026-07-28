@@ -1,4 +1,5 @@
 pub mod address;
+pub mod chain_init;
 pub mod function_call;
 pub mod passenger_concurrent;
 pub mod ride_acceptance;

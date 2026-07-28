@@ -215,6 +215,7 @@ impl Transaction {
             FunctionCall::RideRequestCancel(ride_request_cancel) => {
                 ride_request_cancel.verify_state(&self.from, db)
             }
+            FunctionCall::ChainInit(chain_init) => chain_init.verify_state(&self.from, db),
         }
     }
 
@@ -227,6 +228,7 @@ impl Transaction {
             FunctionCall::RidePay(_) => "RidePay",
             FunctionCall::RideCancel(_) => "RideCancel",
             FunctionCall::RideRequestCancel(_) => "RideRequestCancel",
+            FunctionCall::ChainInit(_) => "ChainInit",
         }
     }
 
@@ -258,6 +260,7 @@ impl Transaction {
             FunctionCall::RideRequestCancel(ride_request_cancel) => {
                 ride_request_cancel.state_transaction(&self.hash, db)
             }
+            FunctionCall::ChainInit(chain_init) => chain_init.state_transaction(db),
         };
 
         match AccountState::increase_account_nonce_key(&self.from, db) {

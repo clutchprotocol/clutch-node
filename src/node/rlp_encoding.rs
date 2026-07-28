@@ -11,6 +11,7 @@ use super::blocks::block_headers::{BlockHeader, BlockHeaders};
 use super::p2p_server::get_block_bodies::GetBlockBodies;
 use super::p2p_server::get_block_header::GetBlockHeaders;
 use super::p2p_server::handshake::Handshake;
+use super::transactions::chain_init::ChainInit;
 use super::transactions::function_call::FunctionCall;
 use super::transactions::ride_acceptance::RideAcceptance;
 use super::transactions::ride_cancel::RideCancel;
@@ -58,6 +59,11 @@ impl Encodable for FunctionCall {
                 stream.append(&8u8); // Tag for RideRequestCancel
                 stream.append(args);
             }
+            FunctionCall::ChainInit(args) => {
+                stream.begin_list(2);
+                stream.append(&9u8); // Tag for ChainInit (genesis-only)
+                stream.append(args);
+            }
         }
     }
 }
@@ -98,6 +104,10 @@ impl Decodable for FunctionCall {
             8 => {
                 let args: RideRequestCancel = rlp.val_at(1)?;
                 Ok(FunctionCall::RideRequestCancel(args))
+            }
+            9 => {
+                let args: ChainInit = rlp.val_at(1)?;
+                Ok(FunctionCall::ChainInit(args))
             }
             _ => Err(DecoderError::Custom("Unknown FunctionCall variant")),
         }

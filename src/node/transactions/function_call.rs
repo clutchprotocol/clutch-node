@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+use super::chain_init::ChainInit;
 use super::{
     ride_acceptance::RideAcceptance, ride_cancel::RideCancel, ride_offer::RideOffer,
     ride_pay::RidePay, ride_request::RideRequest, ride_request_cancel::RideRequestCancel,
@@ -17,6 +18,7 @@ pub enum FunctionCall {
     RidePay(RidePay),
     RideCancel(RideCancel),
     RideRequestCancel(RideRequestCancel),
+    ChainInit(ChainInit),
 }
 
 impl fmt::Display for FunctionCall {
@@ -29,6 +31,7 @@ impl fmt::Display for FunctionCall {
             FunctionCall::RidePay(args) => write!(f, "RidePay: {:?}", args),
             FunctionCall::RideCancel(args) => write!(f, "RideCancel: {:?}", args),
             FunctionCall::RideRequestCancel(args) => write!(f, "RideRequestCancel: {:?}", args),
+            FunctionCall::ChainInit(args) => write!(f, "ChainInit: {:?}", args),
         }
     }
 }
