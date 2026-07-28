@@ -1,9 +1,10 @@
 #[cfg(test)]
 mod tests {
     use clutch_node::node::transactions::function_call::FunctionCall;
+    use clutch_node::node::transactions::mint::Mint;
     use clutch_node::node::transactions::ride_request::RideRequest;
     use hex;
-    use rlp::{Encodable, RlpStream};
+    use rlp::{Decodable, Encodable, Rlp, RlpStream};
     use sha3::{Digest, Keccak256};
     use clutch_node::node::{coordinate, rlp_encoding};
     use clutch_node::node::transactions::transaction::Transaction;
@@ -145,6 +146,47 @@ fn test_rlp_encode_ride_request_transaction() {
     match rlp_encoding::decode::<Transaction>(&encoded) {
         Ok(decoded_tx) => println!("Successfully decoded our own transaction: {:?}", decoded_tx),
         Err(e) => println!("Failed to decode our own transaction: {:?}", e),
+    }
+}
+
+#[test]
+fn mint_rlp_round_trip_pins_wire_contract() {
+    // Mint's encoding is a cross-repo byte-match contract (Treasury Service + JS SDK):
+    // tag 6, 3-item arg list `[to, amount, credit_ref]`. Nothing else in the suite pins
+    // the tag/arity — Task 4 shipped a wrong contract statement precisely because no test
+    // did. Round-trip the fields, then decode the raw structure independently of the
+    // round-trip so a bug that happens to cancel out on both sides can't hide.
+    let mint = Mint {
+        to: "0x4444444444444444444444444444444444444444".to_string(),
+        amount: 5_000_000,
+        credit_ref: "aa".repeat(32),
+    };
+    let function_call = FunctionCall::Mint(mint.clone());
+
+    let mut stream = RlpStream::new();
+    function_call.rlp_append(&mut stream);
+    let encoded = stream.out();
+
+    // Structural check: [tag, args] with tag == 6 and args a 3-item list, read directly
+    // off the wire bytes rather than only through the round-trip below.
+    let rlp = Rlp::new(&encoded);
+    assert!(rlp.is_list(), "FunctionCall wire form must be a list");
+    assert_eq!(rlp.item_count().unwrap(), 2, "FunctionCall wire form is [tag, args]");
+    let tag: u8 = rlp.val_at(0).unwrap();
+    assert_eq!(tag, 6, "Mint's RLP tag must be 6");
+    let args = rlp.at(1).unwrap();
+    assert!(args.is_list(), "Mint args must be a list");
+    assert_eq!(args.item_count().unwrap(), 3, "Mint args must be [to, amount, credit_ref]");
+
+    // Round-trip check: decode back through FunctionCall and confirm all three fields survive.
+    let decoded = FunctionCall::decode(&Rlp::new(&encoded)).expect("decode Mint FunctionCall");
+    match decoded {
+        FunctionCall::Mint(decoded_mint) => {
+            assert_eq!(decoded_mint.to, mint.to, "to must round-trip");
+            assert_eq!(decoded_mint.amount, mint.amount, "amount must round-trip");
+            assert_eq!(decoded_mint.credit_ref, mint.credit_ref, "credit_ref must round-trip");
+        }
+        other => panic!("expected FunctionCall::Mint, got {:?}", other),
     }
 }
 } 

@@ -160,10 +160,19 @@ impl Transaction {
 
     /// First account that appears more than once in `transactions`, if any. Reads only
     /// `from`, so it's pure/DB-free and unit-testable.
+    ///
+    /// This is the same-block exactly-once backstop for Mint: two Mints sharing a
+    /// `credit_ref` in one block are caught here, not by the ref marker (which only
+    /// exists in state *after* the block commits — `verify_state` for both sees
+    /// pre-block state). Canonicalizing (rather than comparing raw `from` strings)
+    /// keeps that guarantee self-contained instead of depending on `SignatureKeys::verify`
+    /// happening to reject case-variant signers elsewhere — a distant invariant, not a
+    /// nonce-ordering nicety.
     fn first_duplicate_sender(transactions: &[Transaction]) -> Option<String> {
+        use super::address::canonical_account_address;
         let mut seen = std::collections::HashSet::new();
         for tx in transactions {
-            if !seen.insert(tx.from.as_str()) {
+            if !seen.insert(canonical_account_address(&tx.from)) {
                 return Some(tx.from.clone());
             }
         }
@@ -404,6 +413,21 @@ mod tests {
         assert_eq!(
             Transaction::first_duplicate_sender(&[a, a2, b]),
             Some("0xA".to_string())
+        );
+    }
+
+    #[test]
+    fn first_duplicate_sender_catches_case_variant() {
+        // Same-block exactly-once backstop for Mint: a case-variant `from` (e.g. two
+        // same-ref mints signed to look like `0xAB...` and `0xab...`) is still the same
+        // account canonically, and must be caught here independent of whatever
+        // `SignatureKeys::verify` happens to accept. Raw string comparison (the
+        // pre-fix behavior) would return `None` for this pair.
+        let a = tf("0xABCDEF", 1, "0x1");
+        let a_variant = tf("0xabcdef", 1, "0x2");
+        assert!(
+            Transaction::first_duplicate_sender(&[a, a_variant]).is_some(),
+            "case-variant senders must canonicalize to the same account"
         );
     }
 

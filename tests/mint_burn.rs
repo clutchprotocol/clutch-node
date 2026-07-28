@@ -104,9 +104,38 @@ fn duplicate_credit_ref_rejected() {
 fn mint_rejects_zero_and_bad_ref() {
     let mut chain = chain("test-mint-bad");
     let zero = signed_mint(AUTHOR_SK, AUTHOR_PK, 1, USER, 0, REF_A);
-    assert!(chain.add_transaction_to_pool(&zero).is_err());
+    let err = chain.add_transaction_to_pool(&zero).unwrap_err();
+    assert!(err.contains("amount must be positive"), "got: {}", err);
     let bad_ref = signed_mint(AUTHOR_SK, AUTHOR_PK, 1, USER, 100, "not-hex");
-    assert!(chain.add_transaction_to_pool(&bad_ref).is_err());
+    let err = chain.add_transaction_to_pool(&bad_ref).unwrap_err();
+    assert!(err.contains("credit_ref must be 64 lowercase hex chars"), "got: {}", err);
+    chain.shutdown_blockchain();
+}
+
+#[test]
+#[serial]
+fn mint_rejects_amount_over_i64_max() {
+    let mut chain = chain("test-mint-overflow");
+    let over = signed_mint(AUTHOR_SK, AUTHOR_PK, 1, USER, i64::MAX as u64 + 1, REF_A);
+    let err = chain.add_transaction_to_pool(&over).unwrap_err();
+    assert!(err.contains("amount exceeds i64::MAX"), "got: {}", err);
+    chain.shutdown_blockchain();
+}
+
+#[test]
+#[serial]
+fn mint_rejects_supply_out_of_range() {
+    // Block-level `total_supply out of range` guard (block.rs) driven through a real
+    // block, not asserted directly: genesis's testnet faucet_allocation (1e15, see `ci()`)
+    // already makes total_supply > 0, so one Mint at the per-tx ceiling (`i64::MAX`, the
+    // largest amount `Mint::verify_state` allows through) pushes
+    // `supply0 + i64::MAX > i64::MAX` and trips the block-level guard on the same tx that
+    // passed per-tx `verify_state` — the two checks are independent and both are needed.
+    let mut chain = chain("test-mint-supply-range");
+    let mint = signed_mint(AUTHOR_SK, AUTHOR_PK, 1, USER, i64::MAX as u64, REF_A);
+    chain.add_transaction_to_pool(&mint).unwrap();
+    let err = chain.author_new_block().unwrap_err();
+    assert!(err.contains("total_supply out of range"), "got: {}", err);
     chain.shutdown_blockchain();
 }
 

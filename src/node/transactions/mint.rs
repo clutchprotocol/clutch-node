@@ -16,7 +16,7 @@ pub fn processed_ref_key(reference: &str) -> Vec<u8> {
 }
 
 pub fn ref_is_valid(reference: &str) -> bool {
-    reference.len() == 64 && reference.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
+    reference.len() == 64 && reference.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f'))
 }
 
 pub fn ref_already_processed(db: &Database, reference: &str) -> Result<bool, String> {
@@ -25,6 +25,17 @@ pub fn ref_already_processed(db: &Database, reference: &str) -> Result<bool, Str
         Ok(None) => Ok(false),
         Err(e) => Err(format!("failed to read processed ref: {}", e)),
     }
+}
+
+/// 20-byte-hex address, optional `0x`/`0X` prefix — same shape `canonical_account_address`
+/// normalizes elsewhere. A malformed `to` here would mint into a garbage state key,
+/// permanently inflating `total_supply` against CLT nobody can spend.
+fn is_valid_address(addr: &str) -> bool {
+    let hex_part = addr
+        .strip_prefix("0x")
+        .or_else(|| addr.strip_prefix("0X"))
+        .unwrap_or(addr);
+    hex_part.len() == 40 && hex_part.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -43,11 +54,19 @@ impl Mint {
                 from
             ));
         }
+        if !is_valid_address(&self.to) {
+            return Err(format!(
+                "Mint rejected: 'to' must be a 20-byte-hex address, got '{}'",
+                self.to
+            ));
+        }
         if self.amount == 0 {
             return Err("Mint rejected: amount must be positive".to_string());
         }
         if self.amount > i64::MAX as u64 {
-            return Err("Mint rejected: amount exceeds i64::MAX (balance deltas are i64)".to_string());
+            return Err(
+                "Mint rejected: amount exceeds i64::MAX (balance deltas are i64)".to_string(),
+            );
         }
         if !ref_is_valid(&self.credit_ref) {
             return Err("Mint rejected: credit_ref must be 64 lowercase hex chars".to_string());
