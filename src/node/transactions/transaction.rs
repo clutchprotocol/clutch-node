@@ -233,8 +233,8 @@ impl Transaction {
     pub fn state_transaction(
         &self,
         db: &Database,
-        ride_request_referrer_fee_percent: u8,
-        ride_offer_referrer_fee_percent: u8,
+        ride_request_referrer_fee_bps: u16,
+        ride_offer_referrer_fee_bps: u16,
     ) -> Vec<StateUpdate> {
         let mut states = match &self.data {
             FunctionCall::Transfer(transfer) => transfer.state_transaction(&self.from, db),
@@ -250,8 +250,8 @@ impl Transaction {
             FunctionCall::RidePay(ride_pay) => ride_pay.state_transaction(
                 &self.hash,
                 db,
-                ride_request_referrer_fee_percent,
-                ride_offer_referrer_fee_percent,
+                ride_request_referrer_fee_bps,
+                ride_offer_referrer_fee_bps,
                 &self.from,
             ),
             FunctionCall::RideCancel(ride_cancel) => ride_cancel.state_transaction(&self.hash, db),

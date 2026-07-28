@@ -19,8 +19,8 @@ fn new_blockchain(name: &str) -> Blockchain {
         true,
         vec![AUTHOR_PUBLIC_KEY.to_string()],
         BLOCK_REWARD_AMOUNT,
-        2,
-        2,
+        200,
+        200,
     )
 }
 

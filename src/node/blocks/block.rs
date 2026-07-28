@@ -297,8 +297,8 @@ impl Block {
         db: &Database,
         block: &Block,
         block_reward_amount: u64,
-        ride_request_referrer_fee_percent: u8,
-        ride_offer_referrer_fee_percent: u8,
+        ride_request_referrer_fee_bps: u16,
+        ride_offer_referrer_fee_bps: u16,
     ) -> Result<(), String> {
         // Storage for keys and values
         let mut cf_storage: Vec<String> = Vec::new();
@@ -336,8 +336,8 @@ impl Block {
         for (tx_index, tx) in block.transactions.iter().enumerate() {
             let updates = tx.state_transaction(
                 &db,
-                ride_request_referrer_fee_percent,
-                ride_offer_referrer_fee_percent,
+                ride_request_referrer_fee_bps,
+                ride_offer_referrer_fee_bps,
             );
 
             let mut tx_effects = Vec::new();

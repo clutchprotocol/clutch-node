@@ -13,12 +13,11 @@ use super::{
     ride_request::RideRequest,
 };
 
-fn referrer_fee_ceiling(percent: u8, fare: u64) -> u64 {
-    if percent == 0 || fare == 0 {
-        return 0;
-    }
-    // saturating so an absurd fare can't overflow-panic (debug) or wrap (release).
-    ((percent as u64).saturating_mul(fare).saturating_add(99)) / 100
+/// Referrer fee in base units: floor(fare * bps / 10_000). Stored as basis points so
+/// fractional percentages need no config migration (spec §4a). u128 intermediate —
+/// the product can exceed u64 but the result never does (result <= fare).
+fn referrer_fee_floor(bps: u16, fare: u64) -> u64 {
+    ((fare as u128 * bps as u128) / 10_000) as u64
 }
 
 /// Split `fare` into (request-referrer fee, offer-referrer fee, driver remainder),
@@ -30,6 +29,7 @@ fn split_fare(fare: u64, request_fee: u64, offer_fee: u64) -> (u64, u64, u64) {
     let request = request_fee.min(fare);
     let offer = offer_fee.min(fare - request);
     let driver = fare - request - offer;
+    debug_assert_eq!(request + offer + driver, fare, "fee split must sum exactly");
     (request, offer, driver)
 }
 
@@ -112,8 +112,8 @@ impl RidePay {
         &self,
         tx_hash: &String,
         db: &Database,
-        request_fee_percent: u8,
-        offer_fee_percent: u8,
+        request_fee_bps: u16,
+        offer_fee_bps: u16,
         passenger: &String,
     ) -> Vec<StateUpdate> {
         let ride_acceptance_tx_hash = &self.ride_acceptance_transaction_hash;
@@ -168,11 +168,11 @@ impl RidePay {
         // Cap referrer fees so request + offer can never exceed the fare being paid; the
         // driver gets the remainder. Prevents the `fare - total_deducted` underflow.
         let request_fee = match &request_referrer {
-            Some(_) => referrer_fee_ceiling(request_fee_percent, self.fare),
+            Some(_) => referrer_fee_floor(request_fee_bps, self.fare),
             None => 0,
         };
         let offer_fee = match &offer_referrer {
-            Some(_) => referrer_fee_ceiling(offer_fee_percent, self.fare),
+            Some(_) => referrer_fee_floor(offer_fee_bps, self.fare),
             None => 0,
         };
         let (request_fee, offer_fee, driver_amount) =
@@ -243,34 +243,46 @@ impl Decodable for RidePay {
 
 #[cfg(test)]
 mod tests {
-    use super::{referrer_fee_ceiling, split_fare};
+    use super::{referrer_fee_floor, split_fare};
+    use proptest::prelude::*;
 
     #[test]
-    fn split_fare_never_exceeds_fare() {
-        // Normal fares: fees fit, driver gets the rest.
-        assert_eq!(split_fare(100, 2, 2), (2, 2, 96));
-        // Ceiling overshoot on tiny fare: 2% of 1 rounds to 1 on each side (sum 2 > 1).
-        // Capped so the total stays 1 and the driver amount never underflows.
-        assert_eq!(split_fare(1, 1, 1), (1, 0, 0));
-        // Misconfigured fees summing to > 100%: still capped at the fare.
-        assert_eq!(split_fare(10, 8, 8), (8, 2, 0));
-        // No referrers: driver gets the whole fare.
-        assert_eq!(split_fare(50, 0, 0), (0, 0, 50));
-        // Invariant across a range: request + offer + driver == fare, no overflow.
-        for fare in [0u64, 1, 2, 3, 100, u64::MAX] {
-            let fee = referrer_fee_ceiling(60, fare);
-            let (r, o, d) = split_fare(fare, fee, fee);
-            assert_eq!(r + o + d, fare, "fare {}", fare);
-            assert!(r + o <= fare);
-        }
+    fn referrer_fee_floor_bps() {
+        assert_eq!(referrer_fee_floor(0, 100), 0);
+        assert_eq!(referrer_fee_floor(200, 0), 0);
+        assert_eq!(referrer_fee_floor(200, 100), 2); // 2% of 100
+        // Floor kills the old ceiling distortion (2% of 3 ceiling-rounded to 33%).
+        assert_eq!(referrer_fee_floor(200, 3), 0);
+        assert_eq!(referrer_fee_floor(200, 49), 0);
+        assert_eq!(referrer_fee_floor(200, 50), 1);
+        assert_eq!(referrer_fee_floor(10_000, u64::MAX), u64::MAX); // 100%, no overflow
+        assert_eq!(referrer_fee_floor(1, 10_000), 1); // 1 bp granularity
     }
 
     #[test]
-    fn referrer_fee_ceiling_saturates() {
-        assert_eq!(referrer_fee_ceiling(0, 100), 0);
-        assert_eq!(referrer_fee_ceiling(2, 0), 0);
-        assert_eq!(referrer_fee_ceiling(2, 100), 2);
-        assert_eq!(referrer_fee_ceiling(2, 1), 1); // ceiling rounds up
-        let _ = referrer_fee_ceiling(100, u64::MAX); // must not overflow-panic
+    fn split_fare_never_exceeds_fare() {
+        assert_eq!(split_fare(100, 2, 2), (2, 2, 96));
+        assert_eq!(split_fare(1, 1, 1), (1, 0, 0));
+        assert_eq!(split_fare(10, 8, 8), (8, 2, 0));
+        assert_eq!(split_fare(50, 0, 0), (0, 0, 50));
+    }
+
+    proptest! {
+        // Spec §4a: request + offer + driver == fare, exactly, for every input.
+        #[test]
+        fn fee_split_sums_exactly(fare in any::<u64>(), rbps in 0u16..=10_000, obps in 0u16..=10_000) {
+            let (r, o, d) = split_fare(
+                fare,
+                referrer_fee_floor(rbps, fare),
+                referrer_fee_floor(obps, fare),
+            );
+            prop_assert!(r <= fare && o <= fare - r);
+            prop_assert_eq!(r + o + d, fare);
+        }
+
+        #[test]
+        fn floor_fee_bounded_by_fare(fare in any::<u64>(), bps in 0u16..=10_000) {
+            prop_assert!(referrer_fee_floor(bps, fare) <= fare);
+        }
     }
 }

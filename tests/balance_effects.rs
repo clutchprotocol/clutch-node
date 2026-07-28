@@ -14,7 +14,7 @@ use clutch_node::node::{
 };
 use serial_test::serial;
 
-const REFERRER_FEE_PERCENT: u8 = 2;
+const REFERRER_FEE_BPS: u16 = 200;
 
 const PASSENGER: &str = "0xdeb4cfb63db134698e1879ea24904df074726cc0";
 const PASSENGER_SK: &str =
@@ -107,7 +107,7 @@ fn ride_pay_emits_referrer_request_fee_effect() {
         );
     }
 
-    let fare = 10u64;
+    let fare = 100u64;
     let ride_pay = RidePay {
         ride_acceptance_transaction_hash: ride_acceptance_hash,
         fare,
@@ -122,8 +122,8 @@ fn ride_pay_emits_referrer_request_fee_effect() {
     let pay_updates = ride_pay.state_transaction(
         &ride_pay_hash,
         &db,
-        REFERRER_FEE_PERCENT,
-        REFERRER_FEE_PERCENT,
+        REFERRER_FEE_BPS,
+        REFERRER_FEE_BPS,
         &PASSENGER.to_string(),
     );
     let mut effects = Vec::new();
@@ -154,18 +154,18 @@ fn ride_pay_emits_referrer_request_fee_effect() {
         .collect();
     assert_eq!(referrer_effects.len(), 1);
     assert_eq!(referrer_effects[0].effect.address, REFERRER);
-    assert_eq!(referrer_effects[0].effect.delta, 1);
+    assert_eq!(referrer_effects[0].effect.delta, 2);
 
     let account_effects = get_account_balance_effects(&db, REFERRER, 20, 0);
     assert!(
         account_effects
             .iter()
-            .any(|e| e.effect.kind == BalanceEffectKind::ReferrerRequestFee && e.effect.delta == 1),
+            .any(|e| e.effect.kind == BalanceEffectKind::ReferrerRequestFee && e.effect.delta == 2),
         "expected referrer_request_fee in account effects"
     );
 
     assert_eq!(
         AccountState::get_current_state(&REFERRER.to_string(), &db).balance,
-        1
+        2
     );
 }
