@@ -68,8 +68,26 @@ fn mainnet_genesis_has_zero_supply() {
 
 #[test]
 #[serial]
-#[should_panic(expected = "faucet")]
+#[should_panic(expected = "non-testnet chain must have zero faucet_allocation")]
 fn mainnet_with_faucet_allocation_fails_loudly() {
     let ci = ChainInit { is_testnet: false, faucet_allocation: 1, ..test_chain_init() };
     let _ = new_test_chain("test-genesis-loud", ci);
+}
+
+#[test]
+#[should_panic(expected = "referrer fee bps sum exceeds 100%")]
+fn referrer_bps_over_100_percent_fails_loudly() {
+    let ci = ChainInit {
+        ride_request_referrer_fee_bps: 6000,
+        ride_offer_referrer_fee_bps: 6000,
+        ..test_chain_init()
+    };
+    let _ = new_test_chain("test-genesis-bps-overflow", ci);
+}
+
+#[test]
+#[should_panic(expected = "faucet_allocation exceeds i64::MAX")]
+fn faucet_allocation_over_i64_max_fails_loudly() {
+    let ci = ChainInit { faucet_allocation: u64::MAX, ..test_chain_init() };
+    let _ = new_test_chain("test-genesis-faucet-overflow", ci);
 }

@@ -66,10 +66,23 @@ impl Blockchain {
         };
 
         Block::genesis_import_block(&blockchain.db, &blockchain.chain_init);
+
+        // A DB from before this release has a genesis block but no chain_params state key
+        // (genesis_import_block no-ops when a genesis block already exists). Every later
+        // add_block_to_chain would then fail quietly, forever. Fail loudly at boot instead.
+        if let Err(e) = ChainInit::get(&blockchain.db) {
+            panic!(
+                "chain_params missing from state after genesis import ({}); this database predates \
+                 the ChainInit release and must be wiped (delete the DB directory and restart)",
+                e
+            );
+        }
+
         blockchain
     }
 
     /// Consensus params + total supply, read from state (post-genesis truth).
+    #[allow(dead_code)] // consumer: Task 8's get_chain_info JSON-RPC method
     pub fn get_chain_info(&self) -> Result<(ChainInit, u64), String> {
         let params = ChainInit::get(&self.db)?;
         let supply = ChainInit::get_total_supply(&self.db)?;

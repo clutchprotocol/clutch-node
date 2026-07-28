@@ -87,7 +87,7 @@ async fn handle_request_message(
     let payload = &request.message[1..];
 
     let response_message = match message_type {
-        Some(DirectMessageType::Handshake) => handle_handshake_request(payload, blockchain).await,
+        Some(DirectMessageType::Handshake) => handle_handshake_request(peer, payload, blockchain).await,
         Some(DirectMessageType::GetBlockHeaders) => {
             handle_get_block_headers_request(payload, blockchain).await
         }
@@ -177,11 +177,11 @@ fn send_response(
     }
 }
 
-async fn handle_handshake_request(payload: &[u8], blockchain: &Arc<Mutex<Blockchain>>) -> Vec<u8> {
+async fn handle_handshake_request(peer: libp2p::PeerId, payload: &[u8], blockchain: &Arc<Mutex<Blockchain>>) -> Vec<u8> {
     match decode::<Handshake>(payload) {
         Ok(handshake) => {
             debug!("Received and decoded handshake: {:?}", handshake);
-            handshake_response(&handshake, blockchain).await
+            handshake_response(peer, &handshake, blockchain).await
         }
         Err(e) => {
             error!("Failed to decode handshake: {:?}", e);
@@ -238,13 +238,23 @@ async fn handle_handshake_response(
         Ok(handshake) => {
             debug!("Decoded Handshake: {:?}", handshake);
             let blockchain = blockchain.lock().await;
-            let current_block_index = match blockchain.handshake() {
-                Ok(handshake) => handshake.latest_block_index,
+            let our_handshake = match blockchain.handshake() {
+                Ok(our_handshake) => our_handshake,
                 Err(e) => {
                     error!("Failed to read local handshake state: {}", e);
                     return;
                 }
             };
+
+            if our_handshake.genesis_block_hash != handshake.genesis_block_hash {
+                error!(
+                    "refusing peer {}: genesis hash mismatch (ours {}, theirs {}) — different chain parameters or a different network",
+                    peer_id, our_handshake.genesis_block_hash, handshake.genesis_block_hash
+                );
+                return;
+            }
+
+            let current_block_index = our_handshake.latest_block_index;
             let received_block_index = handshake.latest_block_index;
 
             if current_block_index < received_block_index {
@@ -320,12 +330,20 @@ async fn handle_block_bodies_response(
 }
 
 async fn handshake_response(
-    _handshake: &Handshake,
+    peer: libp2p::PeerId,
+    handshake: &Handshake,
     blockchain: &Arc<Mutex<Blockchain>>,
 ) -> Vec<u8> {
     let blockchain = blockchain.lock().await;
     match blockchain.handshake() {
         Ok(response_handshake) => {
+            if response_handshake.genesis_block_hash != handshake.genesis_block_hash {
+                error!(
+                    "refusing peer {}: genesis hash mismatch (ours {}, theirs {}) — different chain parameters or a different network",
+                    peer, response_handshake.genesis_block_hash, handshake.genesis_block_hash
+                );
+                return Vec::new();
+            }
             encode_message(DirectMessageType::Handshake, &response_handshake)
         }
         Err(e) => {

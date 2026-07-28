@@ -4,7 +4,7 @@ use tracing::{error, info, warn};
 
 use crate::node::database::Database;
 use crate::node::time_utils::get_current_timespan;
-use crate::node::balance_effect::{persist_block_effects, persist_tx_effects};
+use crate::node::balance_effect::persist_tx_effects;
 use crate::node::transactions::chain_init::ChainInit;
 use crate::node::transactions::function_call::FunctionCall;
 use crate::node::transactions::transaction::Transaction;
