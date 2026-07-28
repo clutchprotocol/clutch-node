@@ -117,6 +117,7 @@ fn import_blocks(blockchain: &mut Blockchain) {
 
 fn author_blocks(blockchain: &mut Blockchain) {
     let ride_request_tx = ride_request_transcation(1, 8);
+    let pooled_hash = ride_request_tx.hash.clone();
     add_transaction_to_pool(&blockchain, ride_request_tx);
 
     // author_new_block already imports the block internally (Blockchain::author_new_block
@@ -131,11 +132,11 @@ fn author_blocks(blockchain: &mut Blockchain) {
     // ponytail: real-clock poll, not a proper test clock. Fine for an integration test;
     // revisit if Aura ever grows an injectable clock.
     let mut last_err = String::new();
-    let mut authored = false;
+    let mut authored = None;
     for _ in 0..300 {
         match blockchain.author_new_block() {
-            Ok(_) => {
-                authored = true;
+            Ok(block) => {
+                authored = Some(block);
                 break;
             }
             Err(e) => {
@@ -144,7 +145,13 @@ fn author_blocks(blockchain: &mut Blockchain) {
             }
         }
     }
-    assert!(authored, "failed to author new block after polling for a full Aura rotation: {}", last_err);
+    // Keep the block: discarding it let the loop pass while authoring an empty block, so a
+    // pool regression that never drained the pending tx would still report green.
+    let block = authored.unwrap_or_else(|| {
+        panic!("failed to author new block after polling for a full Aura rotation: {}", last_err)
+    });
+    assert_eq!(block.transactions.len(), 1, "authored block must carry the pooled transaction");
+    assert_eq!(block.transactions[0].hash, pooled_hash);
     info!("Successfully imported the new block.");
 }
 

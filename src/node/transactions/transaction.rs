@@ -310,6 +310,7 @@ impl Transaction {
                 params.ride_request_referrer_fee_bps,
                 params.ride_offer_referrer_fee_bps,
                 &self.from,
+                fee,
             ),
             FunctionCall::RideCancel(ride_cancel) => {
                 ride_cancel.state_transaction(&self.from, &self.hash, db, fee)
@@ -322,13 +323,15 @@ impl Transaction {
 
         // Standalone fee debit ONLY for types that never write the sender's balance
         // in-type (see routing table). Types that do (Transfer, Burn, RideAcceptance,
-        // RideCancel) merge the fee themselves — two writes to one account key in a tx
-        // collide in the deferred batch (last write wins).
+        // RideCancel, RidePay) merge the fee themselves — two writes to one account key in
+        // a tx collide in the deferred batch (last write wins). RidePay belongs here
+        // because the payer can also be the driver or a referrer it credits.
         let fee_handled_in_type = matches!(
             &self.data,
             FunctionCall::Transfer(_)
                 | FunctionCall::RideAcceptance(_)
                 | FunctionCall::RideCancel(_)
+                | FunctionCall::RidePay(_)
             // Task 7 adds: | FunctionCall::Burn(_)
         );
         if fee > 0 && !fee_handled_in_type {

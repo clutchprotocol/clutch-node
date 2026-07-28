@@ -146,6 +146,9 @@ fn ride_pay_emits_referrer_request_fee_effect() {
         REFERRER_FEE_BPS,
         REFERRER_FEE_BPS,
         &PASSENGER.to_string(),
+        // Fee 0, same reason as the RideAcceptance call above: this test drives per-type
+        // state_transaction directly and asserts only the referrer effect.
+        0,
     );
     let mut effects = Vec::new();
     for update in pay_updates {

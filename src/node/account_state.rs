@@ -72,6 +72,22 @@ impl AccountState {
         format!("account_state_{}", public_key).into_bytes()
     }
 
+    /// The balance key a write for `public_key` lands on. Callers staging a deferred batch
+    /// use it to spot an already-pending write for the same account.
+    pub fn account_state_key(public_key: &str) -> Vec<u8> {
+        Self::construct_account_state_key(&canonical_account_address(public_key))
+    }
+
+    /// Fold `delta` into an account_state value already staged in the block's deferred
+    /// write batch. Pushing a second write for the same key would drop the staged one
+    /// (last write wins), so callers merge into it instead. `None` on corrupt bytes or
+    /// over/underflow — the caller decides what to do rather than silently clamping.
+    pub fn merge_pending_balance(serialized: &[u8], delta: i64) -> Option<Vec<u8>> {
+        let mut state: AccountState = serde_json::from_slice(serialized).ok()?;
+        state.balance = apply_delta(state.balance, delta)?;
+        serde_json::to_vec(&state).ok()
+    }
+
     pub fn update_account_state_key(
         public_key: &String,
         balance_change: i64,
@@ -138,7 +154,10 @@ impl AccountState {
             return vec![Self::apply_balance_change(public_key, main_delta, kind, counterparty, db)];
         }
         let canonical = canonical_account_address(public_key);
-        let combined = main_delta - fee as i64;
+        // Saturating: an unchecked `-` panics in debug and wraps in release, and this is a
+        // Result-based codebase on a money path. Sufficiency is enforced upstream by
+        // validate_transaction, so saturation here can only follow an upstream bug.
+        let combined = main_delta.saturating_sub(fee as i64);
         let (key, value) = Self::update_account_state_key(public_key, combined, db);
         vec![
             StateUpdate {

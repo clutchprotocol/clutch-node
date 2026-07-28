@@ -5,7 +5,10 @@ use tracing::{error, info, warn};
 use crate::node::account_state::AccountState;
 use crate::node::database::Database;
 use crate::node::time_utils::get_current_timespan;
-use crate::node::balance_effect::{persist_block_effects, persist_tx_effects, BalanceEffectKind};
+use crate::node::balance_effect::{
+    persist_block_effects, persist_tx_effects, BalanceEffect, BalanceEffectKind,
+};
+use crate::node::transactions::address::canonical_account_address;
 use crate::node::transactions::chain_init::ChainInit;
 use crate::node::transactions::function_call::FunctionCall;
 use crate::node::transactions::transaction::Transaction;
@@ -383,39 +386,65 @@ impl Block {
         // Fees replace block rewards: one aggregate author credit per block (single
         // write — per-tx credits would collide in the deferred batch). Fee revenue is
         // backed CLT changing hands, so the reserve invariant is untouched.
-        // ponytail: residual ceiling (pre-existing class, same as the old block reward):
-        // if any tx in a fee-paying block ALSO credits the author's balance (Transfer to
-        // author, Mint to author, author-as-driver RidePay), that credit collides with
-        // this write and is lost. Operational rule: validator accounts are not app
-        // accounts. Lift with incremental intra-block state.
+        //
+        // The batch commits only at the end of this function, so every write above was
+        // computed from pre-block state and a second write to a key discards the first.
+        // If the transaction loop already staged a write to the author's balance, this
+        // credit is folded INTO that staged value instead of being appended after it.
+        // That covers both directions: a transaction FROM the author (whose debit used to
+        // be overwritten and the value re-minted) and one crediting the author (a Transfer
+        // to them, an author-as-driver RidePay, whose credit used to be destroyed).
         let total_fees: u64 = block
             .transactions
             .iter()
             .map(|tx| tx.effective_fee(&block.author, &params))
             .sum();
         if block.index > 0 && total_fees > 0 {
-            let fee_update = AccountState::apply_balance_change(
-                &block.author,
-                total_fees as i64,
-                BalanceEffectKind::TxFeeEarned,
-                None,
-                &db,
-            );
-            if let Some((key, value)) = fee_update.storage {
-                cf_storage.push("state".to_string());
-                keys_storage.push(key);
-                values_storage.push(value);
-            }
-            if let Some(effect) = fee_update.effect {
-                for (key, value) in persist_block_effects(
-                    block.index as u64,
-                    block.timestamp,
-                    std::slice::from_ref(&effect),
-                ) {
+            let author_key = AccountState::account_state_key(&block.author);
+            // Fold into the LAST staged write for the key — that is the one that survives
+            // the batch.
+            let staged = keys_storage
+                .iter()
+                .zip(cf_storage.iter())
+                .rposition(|(key, cf)| cf == "state" && *key == author_key);
+            match staged {
+                Some(i) => {
+                    // Appending instead of merging would silently re-introduce the bug, so
+                    // a failed merge (corrupt staged value / overflow) aborts the import.
+                    values_storage[i] =
+                        AccountState::merge_pending_balance(&values_storage[i], total_fees as i64)
+                            .ok_or_else(|| {
+                                format!(
+                                    "failed to merge block fee credit of {} into the staged balance for author {}",
+                                    total_fees, block.author
+                                )
+                            })?;
+                }
+                None => {
+                    let (key, value) = AccountState::update_account_state_key(
+                        &block.author,
+                        total_fees as i64,
+                        &db,
+                    );
                     cf_storage.push("state".to_string());
                     keys_storage.push(key);
                     values_storage.push(value);
                 }
+            }
+            let effect = BalanceEffect {
+                address: canonical_account_address(&block.author),
+                delta: total_fees as i64,
+                kind: BalanceEffectKind::TxFeeEarned,
+                counterparty: None,
+            };
+            for (key, value) in persist_block_effects(
+                block.index as u64,
+                block.timestamp,
+                std::slice::from_ref(&effect),
+            ) {
+                cf_storage.push("state".to_string());
+                keys_storage.push(key);
+                values_storage.push(value);
             }
         }
 

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use tracing::error;
 
 use crate::node::account_state::AccountState;
-use crate::node::balance_effect::{BalanceEffectKind, StateUpdate};
+use crate::node::balance_effect::{BalanceEffect, BalanceEffectKind, StateUpdate};
 use crate::node::database::Database;
 
 use super::{
@@ -118,6 +118,7 @@ impl RidePay {
         request_fee_bps: u16,
         offer_fee_bps: u16,
         passenger: &String,
+        fee: u64,
     ) -> Vec<StateUpdate> {
         let ride_acceptance_tx_hash = &self.ride_acceptance_transaction_hash;
 
@@ -183,37 +184,72 @@ impl RidePay {
 
         let passenger_cp = Some(passenger.clone());
 
-        if request_fee > 0 {
-            if let Some(ref req_ref) = request_referrer {
-                updates.push(AccountState::apply_balance_change(
-                    &canonical_account_address(req_ref),
-                    request_fee as i64,
-                    BalanceEffectKind::ReferrerRequestFee,
-                    passenger_cp.clone(),
-                    db,
-                ));
-            }
+        // Every balance movement this transaction makes, as (canonical address, delta,
+        // audit reason, counterparty). None of these four accounts is guaranteed distinct:
+        // `referrer` is a free-form Option<String> with no self-referral check, and
+        // RideOffer::verify_state never rejects an offer from the passenger, so the payer
+        // can legitimately be the driver and/or a referrer. Two writes to one balance key
+        // collide in the block's deferred batch (last write wins), so the legs are netted
+        // per address below into exactly one write each.
+        let mut legs: Vec<(String, i64, BalanceEffectKind, Option<String>)> = Vec::new();
+        if let (true, Some(req_ref)) = (request_fee > 0, &request_referrer) {
+            legs.push((
+                canonical_account_address(req_ref),
+                request_fee as i64,
+                BalanceEffectKind::ReferrerRequestFee,
+                passenger_cp.clone(),
+            ));
+        }
+        if let (true, Some(off_ref)) = (offer_fee > 0, &offer_referrer) {
+            legs.push((
+                canonical_account_address(off_ref),
+                offer_fee as i64,
+                BalanceEffectKind::ReferrerOfferFee,
+                passenger_cp.clone(),
+            ));
+        }
+        if driver_amount > 0 {
+            legs.push((
+                canonical_account_address(&driver),
+                driver_amount as i64,
+                BalanceEffectKind::RidePayDriverCredit,
+                passenger_cp,
+            ));
+        }
+        if fee > 0 {
+            legs.push((
+                canonical_account_address(passenger),
+                -(fee as i64),
+                BalanceEffectKind::TxFeePaid,
+                None,
+            ));
         }
 
-        if offer_fee > 0 {
-            if let Some(ref off_ref) = offer_referrer {
-                updates.push(AccountState::apply_balance_change(
-                    &canonical_account_address(off_ref),
-                    offer_fee as i64,
-                    BalanceEffectKind::ReferrerOfferFee,
-                    passenger_cp.clone(),
-                    db,
-                ));
-            }
+        // One storage write per distinct address carrying its net delta, attached to that
+        // address's first leg; every later leg on the same address is effect-only, so the
+        // audit trail keeps one record per reason (see
+        // AccountState::apply_balance_change_with_fee for the same shape). Leg order is
+        // fixed by the pushes above — deterministic, unlike HashMap iteration, which must
+        // never reach consensus bytes.
+        // ponytail: O(n^2) over at most four legs; a map would cost more than it saves.
+        for (i, (address, delta, kind, counterparty)) in legs.iter().enumerate() {
+            let first = !legs[..i].iter().any(|(a, ..)| a == address);
+            let net: i64 = legs
+                .iter()
+                .filter(|(a, ..)| a == address)
+                .map(|(_, d, ..)| d)
+                .sum();
+            updates.push(StateUpdate {
+                storage: (first && net != 0)
+                    .then(|| AccountState::update_account_state_key(address, net, db)),
+                effect: Some(BalanceEffect {
+                    address: address.clone(),
+                    delta: *delta,
+                    kind: kind.clone(),
+                    counterparty: counterparty.clone(),
+                }),
+            });
         }
-
-        updates.push(AccountState::apply_balance_change(
-            &driver,
-            driver_amount as i64,
-            BalanceEffectKind::RidePayDriverCredit,
-            passenger_cp,
-            db,
-        ));
 
         updates
     }

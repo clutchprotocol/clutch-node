@@ -1,6 +1,7 @@
 use crate::node::account_state::AccountState;
 use crate::node::balance_effect::{BalanceEffectKind, StateUpdate};
 use crate::node::database::Database;
+use crate::node::transactions::address::canonical_account_address;
 
 use rlp::{Decodable, DecoderError, Encodable, Rlp, RlpStream};
 use serde::{Deserialize, Serialize};
@@ -13,6 +14,17 @@ pub struct Transfer {
 
 impl Transfer {
     pub fn verify_state(&self, from: &String, db: &Database) -> Result<(), String> {
+        // A self-transfer moves nothing, but state_transaction would write the sender's
+        // balance key twice — the merged debit first, then the plain `+value` credit, which
+        // wins in the block's deferred batch. The fee vanishes while the block still credits
+        // the author, and the `+value` is minted outright. No legitimate meaning: reject.
+        if canonical_account_address(&self.to) == canonical_account_address(from) {
+            return Err(format!(
+                "Error: Transfer 'to' must differ from 'from' (self-transfer): {}",
+                canonical_account_address(from)
+            ));
+        }
+
         let from_account_state = AccountState::get_current_state(from, db);
 
         if from_account_state.balance < self.value {
