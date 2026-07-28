@@ -2182,12 +2182,16 @@ Co-Authored-By: Claude Fable 5 <noreply@anthropic.com>"
 {
   "chain_id": 2077, "is_testnet": true, "tx_fee": 1000,
   "ride_request_referrer_fee_bps": 200, "ride_offer_referrer_fee_bps": 200,
-  "mint_authority": "0x...", "total_supply": 1000000000000000,
+  "mint_authority": "0x...", "total_supply": "1000000000000000",
   "latest_block_index": 42
 }
 ```
 
-- **Cross-repo contract:** Treasury reconciliation reads `total_supply` here; hub-api faucet reads `is_testnet`/`chain_id` to fail loudly on non-testnet chains.
+**`total_supply` is a decimal STRING; every other numeric field stays a bare number.** Why, and why this is deliberately not uniform: `total_supply` is the only field that can realistically exceed 2^53 (≈9.007e15) — about $9B circulating at this peg. A JSON number rounds silently past that, and the treasury's reconciliation job treats a supply mismatch as a P1 incident, so a rounded value either fabricates an incident or masks a real one. `chain_id`, `tx_fee`, the bps rates, and `latest_block_index` cannot approach 2^53 (one block per second needs ~285 million years), so stringifying them buys nothing and costs every caller a parse.
+
+`get_account_balance` returns a bare-number `balance` and is deliberately left alone — it has working Rust consumers and changing it is outside this task — but it carries the same latent exposure once an account can hold more than ~$9B, and is tracked in the cross-repo follow-ups.
+
+- **Cross-repo contract:** Treasury reconciliation reads `total_supply` here (as a string — parse it, don't coerce); hub-api faucet reads `is_testnet`/`chain_id` to fail loudly on non-testnet chains.
 
 - [ ] **Step 1: Handler** — `websocket.rs`, add match arm after `get_block_by_index`:
 
@@ -2207,7 +2211,13 @@ and the handler (mirror `handle_get_account_balance`'s shape):
         let blockchain = blockchain.lock().await;
         let latest_index = match blockchain.get_latest_block() {
             Ok(Some(b)) => b.index,
-            _ => 0,
+            // A read failure is not the same as a fresh chain; report 0 but say so, or a
+            // corrupt DB looks like a healthy empty one to the treasury.
+            Ok(None) => 0,
+            Err(e) => {
+                warn!("get_chain_info: failed to read latest block: {}", e);
+                0
+            }
         };
         match blockchain.get_chain_info() {
             Ok((params, total_supply)) => Some(json_rpc_success_response(
@@ -2218,7 +2228,9 @@ and the handler (mirror `handle_get_account_balance`'s shape):
                     "ride_request_referrer_fee_bps": params.ride_request_referrer_fee_bps,
                     "ride_offer_referrer_fee_bps": params.ride_offer_referrer_fee_bps,
                     "mint_authority": params.mint_authority,
-                    "total_supply": total_supply,
+                    // Decimal string: this is the one field that can pass 2^53, and a
+                    // reconciliation job treats a rounded supply as a P1. See the note above.
+                    "total_supply": total_supply.to_string(),
                     "latest_block_index": latest_index,
                 }),
                 id,
