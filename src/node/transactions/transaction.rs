@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
 use std::vec;
 
-use super::{function_call::FunctionCall, passenger_concurrent, transfer::Transfer};
+use super::chain_init::ChainInit;
+use super::{function_call::FunctionCall, passenger_concurrent};
+#[cfg(test)]
+use super::transfer::Transfer;
 
 const FROM_GENESIS: &str = "0xGENESIS";
 
@@ -40,21 +43,12 @@ impl Transaction {
         transaction
     }
 
-    pub fn new_genesis_transactions() -> Vec<Transaction> {
-        let tx1 = Self::new_transaction(
+    pub fn new_genesis_transactions(params: &ChainInit) -> Vec<Transaction> {
+        vec![Self::new_transaction(
             FROM_GENESIS.to_string(),
             0,
-            FunctionCall::Transfer(Transfer {
-                to: "0xdeb4cfb63db134698e1879ea24904df074726cc0".to_string(),
-                // ponytail: i64::MAX, not u64::MAX. Balance deltas travel as i64
-                // (transfer.rs `value as i64`), so funding u64::MAX only ever worked by
-                // two's-complement wrap. i64::MAX (~9.2e18) is still effectively infinite
-                // for a testnet faucet and keeps every balance representable in i64.
-                value: i64::MAX as u64,
-            }),
-        );
-
-        vec![tx1]
+            FunctionCall::ChainInit(params.clone()),
+        )]
     }
 
     /// Canonical transaction hash. MUST stay byte-for-byte in agreement with the client
@@ -232,12 +226,7 @@ impl Transaction {
         }
     }
 
-    pub fn state_transaction(
-        &self,
-        db: &Database,
-        ride_request_referrer_fee_bps: u16,
-        ride_offer_referrer_fee_bps: u16,
-    ) -> Vec<StateUpdate> {
+    pub fn state_transaction(&self, db: &Database, params: &ChainInit) -> Vec<StateUpdate> {
         let mut states = match &self.data {
             FunctionCall::Transfer(transfer) => transfer.state_transaction(&self.from, db),
             FunctionCall::RideRequest(ride_request) => {
@@ -252,8 +241,8 @@ impl Transaction {
             FunctionCall::RidePay(ride_pay) => ride_pay.state_transaction(
                 &self.hash,
                 db,
-                ride_request_referrer_fee_bps,
-                ride_offer_referrer_fee_bps,
+                params.ride_request_referrer_fee_bps,
+                params.ride_offer_referrer_fee_bps,
                 &self.from,
             ),
             FunctionCall::RideCancel(ride_cancel) => ride_cancel.state_transaction(&self.hash, db),

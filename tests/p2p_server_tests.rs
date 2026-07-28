@@ -4,6 +4,7 @@ use clutch_node::node::p2p_server::get_block_bodies::GetBlockBodies;
 use clutch_node::node::p2p_server::get_block_header::GetBlockHeaders;
 use clutch_node::node::p2p_server::{GossipMessageType, P2PServer, P2PServerCommand};
 use clutch_node::node::rlp_encoding::encode;
+use clutch_node::node::transactions::chain_init::ChainInit;
 use tracing::info;
 use std::sync::Arc;
 use std::time::Duration;
@@ -42,15 +43,23 @@ async fn setup_p2p_server(
 }
 
 fn initialize_blockchain(name: String) -> Blockchain {
+    let ci = ChainInit {
+        chain_id: 2077,
+        is_testnet: true,
+        tx_fee: 1000,
+        ride_request_referrer_fee_bps: 2,
+        ride_offer_referrer_fee_bps: 2,
+        mint_authority: "0x9b6e8afff8329743cac73dbef83ca3cbf9a74c20".to_string(),
+        faucet_address: "0xdeb4cfb63db134698e1879ea24904df074726cc0".to_string(),
+        faucet_allocation: 1_000_000_000_000_000,
+    };
     Blockchain::new(
         name,
         "0x9b6e8afff8329743cac73dbef83ca3cbf9a74c20".to_string(),
         "0883ddd3d07303b87c954b0c9383f7b78f45e002520fc03a8adc80595dbf6509".to_string(),
         true,
         vec!["0x9b6e8afff8329743cac73dbef83ca3cbf9a74c20".to_string()],
-        50,
-        2,
-        2,
+        ci,
     )
 }
 

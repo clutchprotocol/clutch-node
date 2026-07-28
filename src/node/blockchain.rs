@@ -11,6 +11,7 @@ use crate::node::balance_effect::{get_account_balance_effects, load_block_effect
 use crate::node::database::Database;
 use crate::node::file_utils::write_to_file;
 use crate::node::node_services::NodeServices;
+use crate::node::transactions::chain_init::ChainInit;
 use crate::node::transactions::ride_acceptance::{AvailableActiveTrip, AvailableRecentTrip, RideAcceptance};
 use crate::node::transactions::ride_offer::{AvailableRideOffer, RideOffer};
 use crate::node::transactions::ride_request::{AvailableRideRequest, MapBounds, RideRequest};
@@ -23,9 +24,7 @@ pub struct Blockchain {
     consensus: Aura,
     author_public_key: String,
     author_secret_key: String,
-    block_reward_amount: u64,
-    ride_request_referrer_fee_bps: u16,
-    ride_offer_referrer_fee_bps: u16,
+    chain_init: ChainInit,
 }
 
 impl Blockchain {
@@ -35,10 +34,25 @@ impl Blockchain {
         author_secret_key: String,
         developer_mode: bool,
         authorities: Vec<String>,
-        block_reward_amount: u64,
-        ride_request_referrer_fee_bps: u16,
-        ride_offer_referrer_fee_bps: u16,
+        chain_init: ChainInit,
     ) -> Blockchain {
+        // Fail loudly at boot on inconsistent economics — spec §4.5. Genesis must never
+        // be importable with a mainnet flag and a faucet pre-mint.
+        assert!(
+            chain_init.ride_request_referrer_fee_bps as u32
+                + chain_init.ride_offer_referrer_fee_bps as u32
+                <= 10_000,
+            "referrer fee bps sum exceeds 100%"
+        );
+        assert!(
+            chain_init.faucet_allocation <= i64::MAX as u64,
+            "faucet_allocation exceeds i64::MAX (balance deltas are i64)"
+        );
+        assert!(
+            chain_init.is_testnet || chain_init.faucet_allocation == 0,
+            "non-testnet chain must have zero faucet_allocation (a surviving faucet pre-mint destroys the peg)"
+        );
+
         let db = Database::new_db(&name);
         let step_duration = 60 / authorities.len() as u64;
         let blockchain = Blockchain {
@@ -48,13 +62,18 @@ impl Blockchain {
             consensus: Aura::new(authorities, step_duration),
             author_public_key,
             author_secret_key,
-            block_reward_amount,
-            ride_request_referrer_fee_bps,
-            ride_offer_referrer_fee_bps,
+            chain_init,
         };
 
-        Block::genesis_import_block(&blockchain.db);
+        Block::genesis_import_block(&blockchain.db, &blockchain.chain_init);
         blockchain
+    }
+
+    /// Consensus params + total supply, read from state (post-genesis truth).
+    pub fn get_chain_info(&self) -> Result<(ChainInit, u64), String> {
+        let params = ChainInit::get(&self.db)?;
+        let supply = ChainInit::get_total_supply(&self.db)?;
+        Ok((params, supply))
     }
 
     pub fn get_latest_block(&self) -> Result<Option<Block>, String> {
@@ -116,13 +135,7 @@ impl Blockchain {
         self.consensus.verify_block_author(&block)?;
         block.validate_block(&self.db)?;
         Transaction::validate_transactions(&self.db, &block.transactions)?;
-        Block::add_block_to_chain(
-            &self.db,
-            block,
-            self.block_reward_amount,
-            self.ride_request_referrer_fee_bps,
-            self.ride_offer_referrer_fee_bps,
-        )?;
+        Block::add_block_to_chain(&self.db, block)?;
 
         Ok(())
     }
@@ -142,18 +155,6 @@ impl Blockchain {
 
     pub fn get_blocks_by_indexes(&self, indexes: Vec<usize>) -> Result<Vec<Block>, String> {
         Block::get_blocks_by_indexes(&self.db, indexes)
-    }
-
-    pub fn block_reward_amount(&self) -> u64 {
-        self.block_reward_amount
-    }
-
-    pub fn ride_request_referrer_fee_bps(&self) -> u16 {
-        self.ride_request_referrer_fee_bps
-    }
-
-    pub fn ride_offer_referrer_fee_bps(&self) -> u16 {
-        self.ride_offer_referrer_fee_bps
     }
 
     #[allow(dead_code)]

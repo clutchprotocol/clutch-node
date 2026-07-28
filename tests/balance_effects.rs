@@ -8,8 +8,9 @@ use clutch_node::node::{
     coordinate,
     database::Database,
     transactions::{
-        function_call::FunctionCall, ride_acceptance::RideAcceptance, ride_offer::RideOffer,
-        ride_pay::RidePay, ride_request::RideRequest, transaction::Transaction,
+        chain_init::ChainInit, function_call::FunctionCall, ride_acceptance::RideAcceptance,
+        ride_offer::RideOffer, ride_pay::RidePay, ride_request::RideRequest,
+        transaction::Transaction,
     },
 };
 use serial_test::serial;
@@ -22,6 +23,19 @@ const PASSENGER_SK: &str =
 const DRIVER: &str = "0x8f19077627cde4848b090c53c83b12956837d5e9";
 const DRIVER_SK: &str = "e74e3f87268132c7b3ddb24600716fc362f4519bf9986a9436aa8a1be58c7150";
 const REFERRER: &str = "0x0912514c7cc3eec2b2dab4e1d150c4b5eaee5a6f";
+
+fn ci() -> ChainInit {
+    ChainInit {
+        chain_id: 2077,
+        is_testnet: true,
+        tx_fee: 1000,
+        ride_request_referrer_fee_bps: REFERRER_FEE_BPS,
+        ride_offer_referrer_fee_bps: REFERRER_FEE_BPS,
+        mint_authority: "0x9b6e8afff8329743cac73dbef83ca3cbf9a74c20".to_string(),
+        faucet_address: PASSENGER.to_string(),
+        faucet_allocation: 1_000_000_000_000_000,
+    }
+}
 
 fn fresh_db() -> Database {
     let name = format!(
@@ -46,7 +60,7 @@ fn apply_state_updates(db: &Database, updates: Vec<StateUpdate>) {
 #[serial]
 fn ride_pay_emits_referrer_request_fee_effect() {
     let db = fresh_db();
-    Block::genesis_import_block(&db);
+    Block::genesis_import_block(&db, &ci());
 
     let mut ride_request_tx = Transaction::new_transaction(
         PASSENGER.to_string(),

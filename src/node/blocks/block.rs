@@ -4,10 +4,9 @@ use tracing::{error, info, warn};
 
 use crate::node::database::Database;
 use crate::node::time_utils::get_current_timespan;
-use crate::node::account_state::AccountState;
-use crate::node::balance_effect::{
-    persist_block_effects, persist_tx_effects, BalanceEffectKind, StateUpdate,
-};
+use crate::node::balance_effect::{persist_block_effects, persist_tx_effects};
+use crate::node::transactions::chain_init::ChainInit;
+use crate::node::transactions::function_call::FunctionCall;
 use crate::node::transactions::transaction::Transaction;
 use crate::node::transactions::transaction_pool::TransactionPool;
 use crate::node::{metric, signature_keys};
@@ -46,7 +45,7 @@ impl Block {
         format!("{:x}", result)
     }
 
-    pub fn new_genesis_block() -> Block {
+    pub fn new_genesis_block(params: &ChainInit) -> Block {
         let mut genesis_block = Block {
             author: String::new(),
             index: 0,
@@ -59,7 +58,7 @@ impl Block {
             transactions: vec![],
         };
 
-        genesis_block.transactions = Transaction::new_genesis_transactions();
+        genesis_block.transactions = Transaction::new_genesis_transactions(params);
         genesis_block.hash = genesis_block.calculate_hash();
         genesis_block
     }
@@ -261,7 +260,7 @@ impl Block {
         Some((keys, values))
     }
 
-    pub fn genesis_import_block(db: &Database) {
+    pub fn genesis_import_block(db: &Database, params: &ChainInit) {
         // ponytail: boot-time genesis. Fail-fast (panic) here is intentional — a node
         // that can't read or write its genesis block cannot run. Runtime paths return Result.
         match Self::get_genesis_block(db) {
@@ -270,8 +269,8 @@ impl Block {
             }
             Ok(None) => {
                 info!("Genesis block does not exist, creating new one...");
-                let genesis_block = Self::new_genesis_block();
-                if let Err(e) = Self::add_block_to_chain(db, &genesis_block, 0, 0, 0) {
+                let genesis_block = Self::new_genesis_block(params);
+                if let Err(e) = Self::add_block_to_chain(db, &genesis_block) {
                     panic!("Failed to import genesis block: {}", e);
                 }
             }
@@ -293,13 +292,25 @@ impl Block {
         }
     }
 
-    pub fn add_block_to_chain(
-        db: &Database,
-        block: &Block,
-        block_reward_amount: u64,
-        ride_request_referrer_fee_bps: u16,
-        ride_offer_referrer_fee_bps: u16,
-    ) -> Result<(), String> {
+    /// Resolve consensus params: from state for normal blocks; from the block's own
+    /// ChainInit for the genesis import (its params aren't in state yet).
+    fn params_for_block(db: &Database, block: &Block) -> Result<ChainInit, String> {
+        if block.index == 0 {
+            block
+                .transactions
+                .iter()
+                .find_map(|tx| match &tx.data {
+                    FunctionCall::ChainInit(ci) => Some(ci.clone()),
+                    _ => None,
+                })
+                .ok_or_else(|| "genesis block missing ChainInit transaction".to_string())
+        } else {
+            ChainInit::get(db)
+        }
+    }
+
+    pub fn add_block_to_chain(db: &Database, block: &Block) -> Result<(), String> {
+        let params = Self::params_for_block(db, block)?;
         // Storage for keys and values
         let mut cf_storage: Vec<String> = Vec::new();
         let mut keys_storage: Vec<Vec<u8>> = Vec::new();
@@ -334,11 +345,7 @@ impl Block {
 
         // Handle transactions State
         for (tx_index, tx) in block.transactions.iter().enumerate() {
-            let updates = tx.state_transaction(
-                &db,
-                ride_request_referrer_fee_bps,
-                ride_offer_referrer_fee_bps,
-            );
+            let updates = tx.state_transaction(&db, &params);
 
             let mut tx_effects = Vec::new();
             for update in updates {
@@ -370,33 +377,6 @@ impl Block {
             // Prepare keys for deletion from tx_pool
             let tx_key = TransactionPool::construct_tx_pool_key(&tx.hash);
             tx_keys_to_delete.push(tx_key);
-        }
-
-        // Mint reward for non-genesis block author.
-        if block.index > 0 && block_reward_amount > 0 {
-            let reward_update = AccountState::apply_balance_change(
-                &block.author,
-                block_reward_amount as i64,
-                BalanceEffectKind::BlockReward,
-                None,
-                &db,
-            );
-            if let Some((author_reward_key, author_reward_value)) = reward_update.storage {
-                cf_storage.push("state".to_string());
-                keys_storage.push(author_reward_key);
-                values_storage.push(author_reward_value);
-            }
-            if let Some(effect) = reward_update.effect {
-                for (key, value) in persist_block_effects(
-                    block.index as u64,
-                    block.timestamp,
-                    std::slice::from_ref(&effect),
-                ) {
-                    cf_storage.push("state".to_string());
-                    keys_storage.push(key);
-                    values_storage.push(value);
-                }
-            }
         }
 
         // Prepare operations for database write

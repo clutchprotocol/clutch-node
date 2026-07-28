@@ -1,6 +1,12 @@
 use std::vec;
 
-use clutch_node::node::{blockchain::Blockchain, transactions::{function_call::FunctionCall, transaction::Transaction, transfer::Transfer}};
+use clutch_node::node::{
+    blockchain::Blockchain,
+    transactions::{
+        chain_init::ChainInit, function_call::FunctionCall, transaction::Transaction,
+        transfer::Transfer,
+    },
+};
 use ::tracing::info;
 
 const BLOCKCHAIN_NAME: &str = "clutch-node-transfer-test";
@@ -9,7 +15,19 @@ const FROM_SECRET_KEY: &str = "d2c446110cfcecbdf05b2be528e72483de5b6f7ef9c7856df
 const TO_ADDRESS_KEY: &str = "0x8f19077627cde4848b090c53c83b12956837d5e9";
 const AUTHOR_PUBLIC_KEY: &str = "0x9b6e8afff8329743cac73dbef83ca3cbf9a74c20";
 const AUTHOR_SECRET_KEY: &str = "0883ddd3d07303b87c954b0c9383f7b78f45e002520fc03a8adc80595dbf6509";
-const BLOCK_REWARD_AMOUNT: u64 = 50;
+
+fn ci() -> ChainInit {
+    ChainInit {
+        chain_id: 2077,
+        is_testnet: true,
+        tx_fee: 1000,
+        ride_request_referrer_fee_bps: 2,
+        ride_offer_referrer_fee_bps: 2,
+        mint_authority: AUTHOR_PUBLIC_KEY.to_string(),
+        faucet_address: FROM_ADDRESS_KEY.to_string(),
+        faucet_allocation: 1_000_000_000_000_000,
+    }
+}
 
 #[test]
 fn author_block() {
@@ -20,9 +38,7 @@ fn author_block() {
         AUTHOR_SECRET_KEY.to_string(),
         true,
         authorities,
-        BLOCK_REWARD_AMOUNT,
-        2,
-        2,
+        ci(),
     );
 
     let transfer_tx = transfer_transaction(1, 20);
@@ -50,8 +66,8 @@ fn author_block() {
 
     let author_account_state = blockchain.get_account_state(&AUTHOR_PUBLIC_KEY.to_string());
     assert_eq!(
-        author_account_state.balance, BLOCK_REWARD_AMOUNT,
-        "author should receive exactly one block reward",
+        author_account_state.balance, 0,
+        "block rewards are removed — author gets nothing for authoring",
     );
 
     blockchain.shutdown_blockchain();

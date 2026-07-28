@@ -355,11 +355,8 @@ impl WebSocket {
         match blockchain.get_blocks_by_indexes(vec![params.index]) {
             Ok(blocks) => {
                 if let Some(block) = blocks.into_iter().next() {
-                    let block_reward = if block.index == 0 {
-                        0
-                    } else {
-                        blockchain.block_reward_amount()
-                    };
+                    // ponytail: block rewards removed; field kept as 0 until clutch-explorer drops it.
+                    let block_reward: u64 = 0;
                     let reward_recipient = block.author.clone();
                     let mut block_value =
                         serde_json::to_value(&block).unwrap_or(serde_json::Value::Null);

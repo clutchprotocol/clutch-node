@@ -19,6 +19,7 @@ mod node;
 use node::blockchain::Blockchain;
 use node::configuration::AppConfig;
 use node::tracing::setup_tracing;
+use node::transactions::chain_init::ChainInit;
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]
@@ -39,14 +40,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn initialize_blockchain(config: &AppConfig) -> Blockchain {
+    let chain_init = ChainInit {
+        chain_id: config.chain_id,
+        is_testnet: config.is_testnet,
+        tx_fee: config.tx_fee,
+        ride_request_referrer_fee_bps: config.ride_request_referrer_fee_bps,
+        ride_offer_referrer_fee_bps: config.ride_offer_referrer_fee_bps,
+        mint_authority: config.mint_authority.clone(),
+        faucet_address: config.faucet_address.clone(),
+        faucet_allocation: config.faucet_allocation,
+    };
+
     Blockchain::new(
         config.blockchain_name.clone(),
         config.author_public_key.clone(),
         config.author_secret_key.clone(),
         config.developer_mode.clone(),
         config.authorities.clone(),
-        config.block_reward_amount,
-        config.ride_request_referrer_fee_bps,
-        config.ride_offer_referrer_fee_bps,
+        chain_init,
     )
 }
