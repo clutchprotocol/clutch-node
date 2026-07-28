@@ -546,8 +546,12 @@ fn burn_plus_transfer_to_the_burner_cannot_share_a_block() {
     let forged = forged_block(&chain, vec![burn.clone(), accomplice.clone()]);
     let err = chain.import_block(&forged).unwrap_err();
     assert!(
-        err.contains(FAUCET_PK),
-        "a block whose transactions write one account must be rejected, naming it: {}",
+        // Both halves matter: the phrase attributes the rejection to THIS guard (FAUCET_PK
+        // alone also appears in the nonce and insufficient-balance errors), and the address
+        // proves it named the colliding account.
+        err.contains("writing the balance of account") && err.contains(FAUCET_PK),
+        "a block whose transactions write one account must be rejected by the written-account \
+         guard, naming it: {}",
         err
     );
 

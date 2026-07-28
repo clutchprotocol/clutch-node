@@ -263,9 +263,14 @@ impl Transaction {
     /// with the same state lookups the matching `state_transaction` performs.
     ///
     /// Deliberately over-approximate, never under: a counterparty is listed whenever it
-    /// exists, without re-deriving the fee split that decides whether its delta is nonzero. An
-    /// unresolvable hash yields a short list, which is sound rather than a hole — the same
-    /// lookup fails in `verify_state` a few lines later and rejects the whole block.
+    /// exists, without re-deriving the fee split that decides whether its delta is nonzero.
+    ///
+    /// An unresolvable hash yields a short list. That is not a hole, but not for the reason
+    /// you might assume — `RidePay::verify_state` never looks up the driver or the request
+    /// referrer, so it would not catch it. The reason is that `state_transaction` unwraps
+    /// these very same lookups, so an unresolvable hash aborts rather than quietly landing an
+    /// unguarded write. Reaching that needs a corrupt DB: each `ride_offer_{h}` /
+    /// `ride_offer_from_{h}` pair is written in one batch, as is the request pair.
     pub(crate) fn written_accounts(&self, db: &Database) -> Vec<String> {
         use super::address::canonical_account_address as canon;
         use super::{ride_acceptance::RideAcceptance, ride_offer::RideOffer, ride_request::RideRequest};
