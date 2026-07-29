@@ -238,11 +238,24 @@ impl Blockchain {
         };
 
         let index = latest_block.index + 1;
-        let previous_hash = latest_block.hash;
+        let previous_hash = latest_block.hash.clone();
         let transactions = match TransactionPool::get_transactions(&self.db) {
             Ok(transactions) => Self::drop_intra_block_conflicts(&self.db, transactions),
             Err(e) => return Err(format!("Failed to get transactions from pool: {}", e)),
         };
+
+        // Empty blocks are legal and necessary — confirmation depth is counted in blocks, so a
+        // chain that stops producing them when idle can never confirm what is already on it (see
+        // `Transaction::validate_transactions` for how that stalled the mint credit path). But
+        // they are a heartbeat, not throughput: this loop ticks every second while a slot lasts
+        // `step_duration` seconds, so emit at most ONE empty block per slot.
+        //
+        // Blocks WITH transactions are deliberately NOT rate-limited here — draining a busy pool
+        // across several blocks within one slot is how throughput is achieved at all, given the
+        // one-tx-per-sender-per-block ceiling.
+        if transactions.is_empty() && self.consensus.block_is_in_current_slot(&latest_block) {
+            return Err("Nothing to author: this slot already has a block".to_string());
+        }
 
         let mut new_block = Block::new_block(index, previous_hash, transactions);
         new_block.sign(&self.author_public_key, &self.author_secret_key);

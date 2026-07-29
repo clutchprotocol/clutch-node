@@ -130,8 +130,20 @@ impl Transaction {
         db: &Database,
         transactions: &Vec<Transaction>,
     ) -> Result<(), String> {
+        // An EMPTY transaction list is valid — an empty block is a legal Aura heartbeat, and
+        // rejecting it here stalled the chain at genesis whenever nothing was being submitted.
+        //
+        // That was not cosmetic. Confirmation depth is counted in blocks, so anything waiting on
+        // `confirmations` blocks of depth needed *later* blocks to exist — and later blocks
+        // needed more transactions. A single Mint on an otherwise-quiet chain therefore never
+        // reached confirmed depth and never got credited: the treasury's whole credit path
+        // stalled permanently on an idle chain.
+        //
+        // Emptiness is not a state question at all, which is why it does not belong in a state
+        // validator. Whether an empty block is *wanted* is an authoring decision, and it lives
+        // in `Blockchain::author_new_block`, which emits at most one per slot.
         if transactions.is_empty() {
-            return Err("No transactions to validate.".to_string());
+            return Ok(());
         }
 
         // Reject a block carrying more than one transaction from the same account. Block
