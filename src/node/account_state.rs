@@ -72,6 +72,22 @@ impl AccountState {
         format!("account_state_{}", public_key).into_bytes()
     }
 
+    /// The balance key a write for `public_key` lands on. Callers staging a deferred batch
+    /// use it to spot an already-pending write for the same account.
+    pub fn account_state_key(public_key: &str) -> Vec<u8> {
+        Self::construct_account_state_key(&canonical_account_address(public_key))
+    }
+
+    /// Fold `delta` into an account_state value already staged in the block's deferred
+    /// write batch. Pushing a second write for the same key would drop the staged one
+    /// (last write wins), so callers merge into it instead. `None` on corrupt bytes or
+    /// over/underflow — the caller decides what to do rather than silently clamping.
+    pub fn merge_pending_balance(serialized: &[u8], delta: i64) -> Option<Vec<u8>> {
+        let mut state: AccountState = serde_json::from_slice(serialized).ok()?;
+        state.balance = apply_delta(state.balance, delta)?;
+        serde_json::to_vec(&state).ok()
+    }
+
     pub fn update_account_state_key(
         public_key: &String,
         balance_change: i64,
@@ -120,6 +136,49 @@ impl AccountState {
                 counterparty,
             }),
         }
+    }
+
+    /// Sender leg with fee merged into ONE balance write and two audit effects.
+    /// Two separate apply_balance_change calls on the same account within a tx would
+    /// each read pre-block state and the deferred batch keeps only the last write —
+    /// silently dropping one debit. One write, split effects, no collision.
+    pub fn apply_balance_change_with_fee(
+        public_key: &String,
+        main_delta: i64,
+        fee: u64,
+        kind: BalanceEffectKind,
+        counterparty: Option<String>,
+        db: &Database,
+    ) -> Vec<StateUpdate> {
+        if fee == 0 {
+            return vec![Self::apply_balance_change(public_key, main_delta, kind, counterparty, db)];
+        }
+        let canonical = canonical_account_address(public_key);
+        // Saturating: an unchecked `-` panics in debug and wraps in release, and this is a
+        // Result-based codebase on a money path. Sufficiency is enforced upstream by
+        // validate_transaction, so saturation here can only follow an upstream bug.
+        let combined = main_delta.saturating_sub(fee as i64);
+        let (key, value) = Self::update_account_state_key(public_key, combined, db);
+        vec![
+            StateUpdate {
+                storage: Some((key, value)),
+                effect: Some(BalanceEffect {
+                    address: canonical.clone(),
+                    delta: main_delta,
+                    kind,
+                    counterparty,
+                }),
+            },
+            StateUpdate {
+                storage: None, // effect-only: storage already carries the combined write
+                effect: Some(BalanceEffect {
+                    address: canonical,
+                    delta: -(fee as i64),
+                    kind: BalanceEffectKind::TxFeePaid,
+                    counterparty: None,
+                }),
+            },
+        ]
     }
 
     fn load_nonce(canonical: &str, db: &Database) -> Result<Option<u64>, String> {

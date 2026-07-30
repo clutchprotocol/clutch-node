@@ -1,6 +1,6 @@
 use crate::node::{
     account_state::AccountState,
-    balance_effect::StateUpdate,
+    balance_effect::{BalanceEffectKind, StateUpdate},
     database::Database,
     signature_keys::{self, SignatureKeys},
 };
@@ -10,7 +10,10 @@ use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
 use std::vec;
 
-use super::{function_call::FunctionCall, passenger_concurrent, transfer::Transfer};
+use super::chain_init::ChainInit;
+use super::{function_call::FunctionCall, passenger_concurrent};
+#[cfg(test)]
+use super::transfer::Transfer;
 
 const FROM_GENESIS: &str = "0xGENESIS";
 
@@ -19,6 +22,7 @@ pub struct Transaction {
     pub from: String,
     pub data: FunctionCall,
     pub nonce: u64,
+    pub chain_id: u64,
     pub signature_r: String,
     pub signature_s: String,
     pub signature_v: i32,
@@ -26,7 +30,12 @@ pub struct Transaction {
 }
 
 impl Transaction {
-    pub fn new_transaction(from: String, nonce: u64, function_call: FunctionCall) -> Transaction {
+    pub fn new_transaction(
+        from: String,
+        nonce: u64,
+        chain_id: u64,
+        function_call: FunctionCall,
+    ) -> Transaction {
         let mut transaction = Transaction {
             hash: String::new(),
             signature_r: String::new(),
@@ -34,40 +43,36 @@ impl Transaction {
             signature_v: 0,
             from: from,
             nonce: nonce,
+            chain_id: chain_id,
             data: function_call,
         };
         transaction.hash = transaction.calculate_hash();
         transaction
     }
 
-    pub fn new_genesis_transactions() -> Vec<Transaction> {
-        let tx1 = Self::new_transaction(
+    pub fn new_genesis_transactions(params: &ChainInit) -> Vec<Transaction> {
+        vec![Self::new_transaction(
             FROM_GENESIS.to_string(),
             0,
-            FunctionCall::Transfer(Transfer {
-                to: "0xdeb4cfb63db134698e1879ea24904df074726cc0".to_string(),
-                // ponytail: i64::MAX, not u64::MAX. Balance deltas travel as i64
-                // (transfer.rs `value as i64`), so funding u64::MAX only ever worked by
-                // two's-complement wrap. i64::MAX (~9.2e18) is still effectively infinite
-                // for a testnet faucet and keeps every balance representable in i64.
-                value: i64::MAX as u64,
-            }),
-        );
-
-        vec![tx1]
+            params.chain_id,
+            FunctionCall::ChainInit(params.clone()),
+        )]
     }
 
     /// Canonical transaction hash. MUST stay byte-for-byte in agreement with the client
     /// hashing in clutch-hub-sdk-js (`signTransaction`) and clutch-hub-api's faucet:
-    /// Keccak-256 over RLP `[from (no 0x prefix), nonce, data]`. `from` is stripped of any
-    /// `0x` because the SDK RLP-encodes it without the prefix; the node's decoder re-adds the
-    /// prefix, so it must be removed again here for the hash to match.
+    /// Keccak-256 over RLP `[from (no 0x prefix), nonce, chain_id, data]`. `from` is stripped
+    /// of any `0x` because the SDK RLP-encodes it without the prefix; the node's decoder
+    /// re-adds the prefix, so it must be removed again here for the hash to match. `chain_id`
+    /// makes the signature network-specific — a transaction signed for one chain hashes (and
+    /// therefore verifies) differently on any other, closing a replay path across networks.
     fn calculate_hash(&self) -> String {
         let from_no_prefix = self.from.strip_prefix("0x").unwrap_or(&self.from);
         let mut stream = RlpStream::new();
-        stream.begin_list(3);
+        stream.begin_list(4);
         stream.append(&from_no_prefix.to_string());
         stream.append(&self.nonce);
+        stream.append(&self.chain_id);
         stream.append(&self.data);
         let rlp_bytes = stream.out();
 
@@ -77,7 +82,7 @@ impl Transaction {
     }
 
     /// Rejects a transaction whose `hash` field was not honestly derived from
-    /// `(from, nonce, data)`. Without this the hash is attacker-controlled and doubles as a
+    /// `(from, nonce, chain_id, data)`. Without this the hash is attacker-controlled and doubles as a
     /// storage key (`ride_request_{hash}`, etc.), letting a caller collide/shadow another
     /// ride's state. Comparison is 0x- and case-insensitive because the wire hash arrives
     /// without a `0x` prefix while node-built hashes carry one.
@@ -125,8 +130,20 @@ impl Transaction {
         db: &Database,
         transactions: &Vec<Transaction>,
     ) -> Result<(), String> {
+        // An EMPTY transaction list is valid — an empty block is a legal Aura heartbeat, and
+        // rejecting it here stalled the chain at genesis whenever nothing was being submitted.
+        //
+        // That was not cosmetic. Confirmation depth is counted in blocks, so anything waiting on
+        // `confirmations` blocks of depth needed *later* blocks to exist — and later blocks
+        // needed more transactions. A single Mint on an otherwise-quiet chain therefore never
+        // reached confirmed depth and never got credited: the treasury's whole credit path
+        // stalled permanently on an idle chain.
+        //
+        // Emptiness is not a state question at all, which is why it does not belong in a state
+        // validator. Whether an empty block is *wanted* is an authoring decision, and it lives
+        // in `Blockchain::author_new_block`, which emits at most one per slot.
         if transactions.is_empty() {
-            return Err("No transactions to validate.".to_string());
+            return Ok(());
         }
 
         // Reject a block carrying more than one transaction from the same account. Block
@@ -137,12 +154,48 @@ impl Transaction {
         // the last-write-wins batch collapses the two debits into one while both credits
         // land — minting CLT. Until intra-block state is applied incrementally, one tx per
         // account per block is the safe ceiling (the author drains the rest into later
-        // blocks; see `Blockchain::one_tx_per_sender`).
+        // blocks; see `Blockchain::drop_intra_block_conflicts`).
         // ponytail: lift this cap once per-tx state is visible to the next tx in the block.
         if let Some(dup) = Self::first_duplicate_sender(transactions) {
             return Err(format!(
                 "Block contains multiple transactions from the same account '{}'; only one per block is allowed.",
                 dup
+            ));
+        }
+
+        if let Some((reference, from)) = Self::first_duplicate_ref(transactions) {
+            return Err(format!(
+                "Block contains multiple transactions claiming the exactly-once ref '{}' (second from '{}'); a ref may be claimed once.",
+                reference, from
+            ));
+        }
+
+        // Both guards above key on the sender, so neither sees the same collapse between two
+        // transactions from *different* senders that write one account. Both compute their
+        // write from pre-block state and the deferred batch keeps the last one staged.
+        //
+        // With Burn that was attacker-profitable: a `Burn{amount, redemption_ref}` from B
+        // plus a `Transfer{to: B, value: 1}` from an accomplice at a higher nonce (blocks
+        // sort by nonce, so the attacker chooses the order) leaves the staged balance at
+        // `pre_B + 1` — B keeps the burned amount and its fee — while `total_supply` still
+        // falls, because the supply delta is summed from the transaction list and never
+        // consults whether the balance write survived, and `processed_ref_{ref}` commits. The
+        // off-chain treasury sees a confirmed, exactly-once burn and pays out against it.
+        // Mint mirrors it: a Transfer to the beneficiary destroys the mint credit while
+        // supply rises and the ref is consumed forever. RideCancel's passenger refund and
+        // RidePay's driver/referrer credits are the same shape.
+        //
+        // ponytail: fail-closed — rejecting is auditable, computing a merged state on a
+        // consensus path is not. The ceiling is real: the default config points every ride at
+        // one configured referrer address, so two RidePay transactions in one block now defer
+        // one of them, a genuine throughput cut on the most common flow. It is still strictly
+        // better than today, which silently destroys one of the two referrer fees. Lift it by
+        // merging staged writes per account inside `add_block_to_chain`'s transaction loop,
+        // generalizing the author-fee merge already there.
+        if let Some(account) = Self::first_shared_written_account(db, transactions) {
+            return Err(format!(
+                "Block contains two transactions writing the balance of account '{}'; only one writer per account per block is allowed.",
+                account
             ));
         }
 
@@ -155,11 +208,162 @@ impl Transaction {
 
     /// First account that appears more than once in `transactions`, if any. Reads only
     /// `from`, so it's pure/DB-free and unit-testable.
+    ///
+    /// This guards balance/nonce staleness only. It is NOT the same-block exactly-once
+    /// backstop, though it was while Mint was the only ref-carrying type: every Mint is
+    /// signed by the single authorized authority, so two same-ref Mints in one block were
+    /// necessarily the same sender and got caught here. Burn is permissionless, so two
+    /// *different* senders can carry one `redemption_ref` — `first_duplicate_ref` is what
+    /// provides the guarantee now, for both types. Canonicalizing (rather than comparing
+    /// raw `from` strings) keeps the account cap self-contained instead of depending on
+    /// `SignatureKeys::verify` happening to reject case-variant signers elsewhere.
     fn first_duplicate_sender(transactions: &[Transaction]) -> Option<String> {
+        use super::address::canonical_account_address;
         let mut seen = std::collections::HashSet::new();
         for tx in transactions {
-            if !seen.insert(tx.from.as_str()) {
+            if !seen.insert(canonical_account_address(&tx.from)) {
                 return Some(tx.from.clone());
+            }
+        }
+        None
+    }
+
+    /// The exactly-once ref this transaction claims, if any: Mint's `credit_ref` (always
+    /// present) or Burn's `redemption_ref` (optional — `None` is the absence of a claim and
+    /// must never collide, including with another `None`). Both write the same
+    /// `processed_ref_{ref}` marker, one namespace across the two types by design.
+    pub(crate) fn exactly_once_ref(&self) -> Option<&str> {
+        match &self.data {
+            FunctionCall::Mint(m) => Some(m.credit_ref.as_str()),
+            FunctionCall::Burn(b) => b.redemption_ref.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// First ref claimed twice in `transactions`, as `(ref, the second claimant's `from`)`.
+    /// Pure/DB-free like `first_duplicate_sender`, and the same kind of backstop.
+    ///
+    /// `verify_state` rejects an already-marked ref, but it reads *committed* state and the
+    /// block's writes only commit at the end of `add_block_to_chain` — so two txs in one
+    /// block bearing one ref both see it unused, both apply, and their two identical marker
+    /// writes collapse to one in the deferred batch. Nothing is minted and the supply delta
+    /// stays right; what breaks is exactly-once, which is the whole point of the field: the
+    /// treasury would see two confirmed on-chain claims on a single off-chain intent.
+    ///
+    /// Comparison is exact, not case-folded, deliberately: the collision being prevented is
+    /// two equal `processed_ref_{ref}` keys, and those keys embed the raw string. A
+    /// case-variant ref is a different key (and is separately rejected by `ref_is_valid`,
+    /// which demands 64 lowercase hex chars), so equality here is precisely the invariant.
+    fn first_duplicate_ref(transactions: &[Transaction]) -> Option<(String, String)> {
+        let mut seen = std::collections::HashSet::new();
+        for tx in transactions {
+            if let Some(reference) = tx.exactly_once_ref() {
+                if !seen.insert(reference) {
+                    return Some((reference.to_string(), tx.from.clone()));
+                }
+            }
+        }
+        None
+    }
+
+    /// Canonical addresses whose `account_state_{addr}` key this transaction writes.
+    ///
+    /// The sibling of `state_transaction`'s balance legs, and it must stay in step with them:
+    /// two transactions naming one account here cannot share a block. Every non-fee-exempt
+    /// type writes its sender (the flat fee — merged in-type for the types that already touch
+    /// the sender, appended by `state_transaction` otherwise); the rest is per-type, resolved
+    /// with the same state lookups the matching `state_transaction` performs.
+    ///
+    /// Deliberately over-approximate, never under: a counterparty is listed whenever it
+    /// exists, without re-deriving the fee split that decides whether its delta is nonzero.
+    ///
+    /// An unresolvable hash yields a short list. That is not a hole, but not for the reason
+    /// you might assume — `RidePay::verify_state` never looks up the driver or the request
+    /// referrer, so it would not catch it. The reason is that `state_transaction` unwraps
+    /// these very same lookups, so an unresolvable hash aborts rather than quietly landing an
+    /// unguarded write. Reaching that needs a corrupt DB: each `ride_offer_{h}` /
+    /// `ride_offer_from_{h}` pair is written in one batch, as is the request pair.
+    pub(crate) fn written_accounts(&self, db: &Database) -> Vec<String> {
+        use super::address::canonical_account_address as canon;
+        use super::{ride_acceptance::RideAcceptance, ride_offer::RideOffer, ride_request::RideRequest};
+
+        let mut accounts = Vec::new();
+        if !self.fee_exempt() {
+            accounts.push(canon(&self.from));
+        }
+        match &self.data {
+            FunctionCall::Transfer(t) => accounts.push(canon(&t.to)),
+            FunctionCall::Mint(m) => accounts.push(canon(&m.to)),
+            FunctionCall::RidePay(p) => {
+                // Driver, request referrer and offer referrer — the accounts RidePay's
+                // `legs` credit, reached by the same acceptance -> offer -> request walk.
+                if let Ok(Some(acceptance)) =
+                    RideAcceptance::get_ride_acceptance(&p.ride_acceptance_transaction_hash, db)
+                {
+                    let offer_hash = &acceptance.ride_offer_transaction_hash;
+                    if let Ok(Some(driver)) = RideOffer::get_from(offer_hash, db) {
+                        accounts.push(canon(&driver));
+                    }
+                    if let Ok(Some(offer)) = RideOffer::get_ride_offer(offer_hash, db) {
+                        if let Some(referrer) = &offer.referrer {
+                            accounts.push(canon(referrer));
+                        }
+                        if let Ok(Some(request)) = RideRequest::get_ride_request(
+                            &offer.ride_request_transaction_hash,
+                            db,
+                        ) {
+                            if let Some(referrer) = &request.referrer {
+                                accounts.push(canon(referrer));
+                            }
+                        }
+                    }
+                }
+            }
+            FunctionCall::RideCancel(c) => {
+                // The refund goes to the passenger, who may or may not be the sender.
+                if let Ok(Some(acceptance)) =
+                    RideAcceptance::get_ride_acceptance(&c.ride_acceptance_transaction_hash, db)
+                {
+                    if let Ok(Some(offer)) =
+                        RideOffer::get_ride_offer(&acceptance.ride_offer_transaction_hash, db)
+                    {
+                        if let Ok(Some(passenger)) =
+                            RideRequest::get_from(&offer.ride_request_transaction_hash, db)
+                        {
+                            accounts.push(canon(&passenger));
+                        }
+                    }
+                }
+            }
+            // Genesis-only, and genesis carries exactly this one transaction.
+            FunctionCall::ChainInit(ci) => accounts.push(canon(&ci.faucet_address)),
+            // Sender only: Burn debits it, and the ride-setup types touch no other balance
+            // (RideAcceptance escrows the fare out of the sender's own balance; the other
+            // three write ride state plus the sender's fee and nothing more).
+            FunctionCall::Burn(_)
+            | FunctionCall::RideRequest(_)
+            | FunctionCall::RideOffer(_)
+            | FunctionCall::RideAcceptance(_)
+            | FunctionCall::RideRequestCancel(_) => {}
+        }
+        // Repeats within one transaction are legal — those writes are netted per address
+        // in-type — so only distinct accounts reach the cross-transaction check.
+        accounts.sort();
+        accounts.dedup();
+        accounts
+    }
+
+    /// First account two transactions in `transactions` both write, if any.
+    fn first_shared_written_account(
+        db: &Database,
+        transactions: &[Transaction],
+    ) -> Option<String> {
+        let mut seen = std::collections::HashSet::new();
+        for tx in transactions {
+            for account in tx.written_accounts(db) {
+                if !seen.insert(account.clone()) {
+                    return Some(account);
+                }
             }
         }
         None
@@ -168,10 +372,58 @@ impl Transaction {
     pub fn validate_transaction(&self, db: &Database) -> Result<(), String> {
         self.verify_hash()?;
         self.verify_signature()?;
+        let params = ChainInit::get(db)?;
+        if self.chain_id != params.chain_id {
+            return Err(format!(
+                "Verification failed: transaction chain_id {} does not match chain {}",
+                self.chain_id, params.chain_id
+            ));
+        }
+        if !self.fee_exempt() {
+            let required = self
+                .sender_direct_debit()
+                .checked_add(params.tx_fee)
+                .ok_or("Verification failed: amount + fee overflows u64")?;
+            let balance = AccountState::get_current_state(&self.from, db).balance;
+            if balance < required {
+                return Err(format!(
+                    "Verification failed: insufficient balance for amount + fee. Required: {}, available: {}",
+                    required, balance
+                ));
+            }
+        }
         self.verify_nonce(db)?;
         self.verify_state(db)?;
-
         Ok(())
+    }
+
+    /// Mint is exempt: the treasury authority mints TO users and may itself hold zero
+    /// balance. ChainInit is genesis-only. Everything else pays the flat fee.
+    fn fee_exempt(&self) -> bool {
+        matches!(&self.data, FunctionCall::Mint(_) | FunctionCall::ChainInit(_))
+    }
+
+    /// CLT the sender's balance is directly debited by this tx (excluding the fee).
+    fn sender_direct_debit(&self) -> u64 {
+        match &self.data {
+            FunctionCall::Transfer(t) => t.value,
+            FunctionCall::Burn(b) => b.amount,
+            _ => 0,
+        }
+    }
+
+    /// ponytail: author's own tx nets zero fee — a debit and an aggregate credit on the
+    /// same account in one block collide in the deferred batch (last write wins), so we
+    /// skip both sides instead. Lift with incremental intra-block state.
+    pub fn effective_fee(&self, block_author: &str, params: &ChainInit) -> u64 {
+        use crate::node::transactions::address::canonical_account_address;
+        if self.fee_exempt()
+            || canonical_account_address(&self.from) == canonical_account_address(block_author)
+        {
+            0
+        } else {
+            params.tx_fee
+        }
     }
 
     fn verify_nonce(&self, db: &Database) -> Result<bool, String> {
@@ -212,9 +464,12 @@ impl Transaction {
             }
             FunctionCall::RidePay(ride_pay) => ride_pay.verify_state(&self.from, db),
             FunctionCall::RideCancel(ride_cancel) => ride_cancel.verify_state(&self.from, db),
+            FunctionCall::Mint(mint) => mint.verify_state(&self.from, db),
+            FunctionCall::Burn(burn) => burn.verify_state(&self.from, db),
             FunctionCall::RideRequestCancel(ride_request_cancel) => {
                 ride_request_cancel.verify_state(&self.from, db)
             }
+            FunctionCall::ChainInit(chain_init) => chain_init.verify_state(&self.from, db),
         }
     }
 
@@ -226,18 +481,22 @@ impl Transaction {
             FunctionCall::RideAcceptance(_) => "RideAcceptance",
             FunctionCall::RidePay(_) => "RidePay",
             FunctionCall::RideCancel(_) => "RideCancel",
+            FunctionCall::Mint(_) => "Mint",
+            FunctionCall::Burn(_) => "Burn",
             FunctionCall::RideRequestCancel(_) => "RideRequestCancel",
+            FunctionCall::ChainInit(_) => "ChainInit",
         }
     }
 
     pub fn state_transaction(
         &self,
         db: &Database,
-        ride_request_referrer_fee_percent: u8,
-        ride_offer_referrer_fee_percent: u8,
+        params: &ChainInit,
+        block_author: &str,
     ) -> Vec<StateUpdate> {
+        let fee = self.effective_fee(block_author, params);
         let mut states = match &self.data {
-            FunctionCall::Transfer(transfer) => transfer.state_transaction(&self.from, db),
+            FunctionCall::Transfer(transfer) => transfer.state_transaction(&self.from, db, fee),
             FunctionCall::RideRequest(ride_request) => {
                 ride_request.state_transaction(&self.from, &self.hash, db)
             }
@@ -245,20 +504,49 @@ impl Transaction {
                 ride_offer.state_transaction(&self.from, &self.hash, db)
             }
             FunctionCall::RideAcceptance(ride_acceptance) => {
-                ride_acceptance.state_transaction(&self.from, &self.hash, db)
+                ride_acceptance.state_transaction(&self.from, &self.hash, db, fee)
             }
             FunctionCall::RidePay(ride_pay) => ride_pay.state_transaction(
                 &self.hash,
                 db,
-                ride_request_referrer_fee_percent,
-                ride_offer_referrer_fee_percent,
+                params.ride_request_referrer_fee_bps,
+                params.ride_offer_referrer_fee_bps,
                 &self.from,
+                fee,
             ),
-            FunctionCall::RideCancel(ride_cancel) => ride_cancel.state_transaction(&self.hash, db),
+            FunctionCall::RideCancel(ride_cancel) => {
+                ride_cancel.state_transaction(&self.from, &self.hash, db, fee)
+            }
+            FunctionCall::Mint(mint) => mint.state_transaction(&self.hash, db),
+            FunctionCall::Burn(burn) => burn.state_transaction(&self.from, &self.hash, db, fee),
             FunctionCall::RideRequestCancel(ride_request_cancel) => {
                 ride_request_cancel.state_transaction(&self.hash, db)
             }
+            FunctionCall::ChainInit(chain_init) => chain_init.state_transaction(db),
         };
+
+        // Standalone fee debit ONLY for types that never write the sender's balance
+        // in-type (see routing table). Types that do (Transfer, Burn, RideAcceptance,
+        // RideCancel, RidePay) merge the fee themselves — two writes to one account key in
+        // a tx collide in the deferred batch (last write wins). RidePay belongs here
+        // because the payer can also be the driver or a referrer it credits.
+        let fee_handled_in_type = matches!(
+            &self.data,
+            FunctionCall::Transfer(_)
+                | FunctionCall::RideAcceptance(_)
+                | FunctionCall::RideCancel(_)
+                | FunctionCall::RidePay(_)
+                | FunctionCall::Burn(_)
+        );
+        if fee > 0 && !fee_handled_in_type {
+            states.push(AccountState::apply_balance_change(
+                &self.from,
+                -(fee as i64),
+                BalanceEffectKind::TxFeePaid,
+                None,
+                db,
+            ));
+        }
 
         match AccountState::increase_account_nonce_key(&self.from, db) {
             Ok((nonce_key, nonce_serialized)) => {
@@ -279,11 +567,29 @@ mod tests {
         Transaction::new_transaction(
             from.to_string(),
             nonce,
+            2077,
             FunctionCall::Transfer(Transfer {
                 to: to.to_string(),
                 value: 1,
             }),
         )
+    }
+
+    #[test]
+    fn hash_commits_to_chain_id() {
+        let a = Transaction::new_transaction(
+            "0xdeb4cfb63db134698e1879ea24904df074726cc0".to_string(),
+            1,
+            2077,
+            FunctionCall::Transfer(Transfer { to: "0xA".to_string(), value: 10 }),
+        );
+        let b = Transaction::new_transaction(
+            "0xdeb4cfb63db134698e1879ea24904df074726cc0".to_string(),
+            1,
+            1,
+            FunctionCall::Transfer(Transfer { to: "0xA".to_string(), value: 10 }),
+        );
+        assert_ne!(a.hash, b.hash, "same tx on a different chain must hash differently");
     }
 
     #[test]
@@ -304,21 +610,113 @@ mod tests {
     }
 
     #[test]
-    fn accepts_sdk_generated_ride_acceptance_hash() {
-        // Fixture: real clutch-hub-sdk-js signTransaction() output for a RideAcceptance.
-        // Pins node calculate_hash byte-for-byte against the SDK's Keccak/RLP encoding.
-        let raw = "f90138a83962366538616666663833323937343363616337336462656638336361336362663961373463323007b84034616630393332613765356263356435643662313065643333613638353861376437333330306131333536646664316137643733333936323932366132613366b840333634383362373936323562326566613037333337616633666638393430623163393936666133663463633035636533656535366434666433323136636436651cb84062643737323039366235663965313038333437316339313137633564653736336363623131666334386535333562366439633631336263306662323763393862f84503f842b84061626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162616261626162";
-        let bytes = hex::decode(raw).expect("fixture hex");
-        let tx: Transaction =
-            crate::node::rlp_encoding::decode(&bytes).expect("decode SDK tx");
+    fn first_duplicate_sender_catches_case_variant() {
+        // Same-block exactly-once backstop for Mint: a case-variant `from` (e.g. two
+        // same-ref mints signed to look like `0xAB...` and `0xab...`) is still the same
+        // account canonically, and must be caught here independent of whatever
+        // `SignatureKeys::verify` happens to accept. Raw string comparison (the
+        // pre-fix behavior) would return `None` for this pair.
+        let a = tf("0xABCDEF", 1, "0x1");
+        let a_variant = tf("0xabcdef", 1, "0x2");
+        assert!(
+            Transaction::first_duplicate_sender(&[a, a_variant]).is_some(),
+            "case-variant senders must canonicalize to the same account"
+        );
+    }
+
+    fn burn_tx(from: &str, redemption_ref: Option<&str>) -> Transaction {
+        Transaction::new_transaction(
+            from.to_string(),
+            1,
+            2077,
+            FunctionCall::Burn(super::super::burn::Burn {
+                amount: 1,
+                redemption_ref: redemption_ref.map(|r| r.to_string()),
+            }),
+        )
+    }
+
+    fn mint_tx(from: &str, credit_ref: &str) -> Transaction {
+        Transaction::new_transaction(
+            from.to_string(),
+            1,
+            2077,
+            FunctionCall::Mint(super::super::mint::Mint {
+                to: "0x1".to_string(),
+                amount: 1,
+                credit_ref: credit_ref.to_string(),
+            }),
+        )
+    }
+
+    #[test]
+    fn first_duplicate_ref_catches_two_senders_claiming_one_ref() {
+        // The Burn attack: permissionless senders, so `first_duplicate_sender` returns None
+        // and this is the only thing standing between a pending redemption ref and a second
+        // on-chain claim on it.
+        let r = "a".repeat(64);
+        let alice = burn_tx("0xA", Some(&r));
+        let attacker = burn_tx("0xB", Some(&r));
+        assert_eq!(Transaction::first_duplicate_sender(&[alice.clone(), attacker.clone()]), None);
+        assert_eq!(
+            Transaction::first_duplicate_ref(&[alice, attacker]),
+            Some((r, "0xB".to_string())),
+            "the second claimant is named"
+        );
+    }
+
+    #[test]
+    fn first_duplicate_ref_spans_mint_and_burn() {
+        // One `processed_ref_{ref}` namespace across both types by design.
+        let r = "b".repeat(64);
+        assert!(
+            Transaction::first_duplicate_ref(&[mint_tx("0xA", &r), burn_tx("0xB", Some(&r))])
+                .is_some(),
+            "a Mint and a Burn claiming one ref write the same marker key"
+        );
+    }
+
+    #[test]
+    fn first_duplicate_ref_ignores_absent_refs() {
+        // `None` is no claim at all — two of them must not read as a collision, or every
+        // multi-burn block dies. Distinct refs and non-ref types are likewise fine.
+        assert_eq!(
+            Transaction::first_duplicate_ref(&[
+                burn_tx("0xA", None),
+                burn_tx("0xB", None),
+                tf("0xC", 1, "0xD"),
+                burn_tx("0xE", Some(&"a".repeat(64))),
+                burn_tx("0xF", Some(&"b".repeat(64))),
+            ]),
+            None
+        );
+    }
+
+    #[test]
+    fn accepts_sdk_style_ride_acceptance_hash() {
+        // TODO(sdk-v3): no test currently pins the node's hashing against externally-produced
+        // (real clutch-hub-sdk-js) bytes. The old pinned fixture predates chain_id and cannot
+        // be regenerated until the SDK adds chain_id; this builds an equivalent RideAcceptance
+        // via sdk_style_tx instead. Re-pin against real SDK output once the SDK supports chain_id.
+        let ride_offer_hash = "ab".repeat(32);
+        let mut args = RlpStream::new_list(1);
+        args.append(&ride_offer_hash);
+        let args = args.out();
+
+        let mut fc = RlpStream::new_list(2);
+        fc.append(&3u8); // RideAcceptance
+        fc.append_raw(args.as_ref(), 1);
+
+        let tx = sdk_style_tx(
+            "9b6e8afff8329743cac73dbef83ca3cbf9a74c20",
+            7,
+            2077,
+            fc.out().as_ref(),
+        );
         assert!(
             tx.verify_hash().is_ok(),
-            "node rejected a hash the SDK actually produced: {:?}",
+            "node rejected an SDK-style RideAcceptance hash: {:?}",
             tx.verify_hash()
-        );
-        assert_eq!(
-            tx.hash.strip_prefix("0x").unwrap_or(&tx.hash),
-            "bd772096b5f9e1083471c9117c5de763ccb11fc48e535b6d9c613bc0fb27c98b"
         );
     }
 
@@ -341,18 +739,20 @@ mod tests {
         fc.append_raw(transfer_out.as_ref(), 1);
         let data_rlp = fc.out();
 
-        let mut unsigned = RlpStream::new_list(3);
+        let mut unsigned = RlpStream::new_list(4);
         unsigned.append(&from_clean.to_string());
         unsigned.append(&nonce);
+        unsigned.append(&2077u64);
         unsigned.append_raw(data_rlp.as_ref(), 1);
         let mut hasher = Keccak256::new();
         hasher.update(unsigned.out().as_ref());
         let hash_hex = hex::encode(hasher.finalize());
 
         let dummy = "cd".repeat(32);
-        let mut full = RlpStream::new_list(7);
+        let mut full = RlpStream::new_list(8);
         full.append(&from_clean.to_string());
         full.append(&nonce);
+        full.append(&2077u64);
         full.append(&dummy);
         full.append(&dummy);
         full.append(&28u64);
@@ -369,23 +769,24 @@ mod tests {
         );
     }
 
-    /// Builds a full signed tx for a `data` payload the way the SDK does: the hash is
-    /// Keccak-256 over the unsigned `[from (no 0x), nonce, data]` preimage, so these bytes are
-    /// self-consistent by construction. Anything the node's re-encode changes relative to the
-    /// wire bytes surfaces as a `verify_hash` mismatch.
-    fn sdk_style_tx(from_clean: &str, nonce: u64, data_rlp: &[u8]) -> Transaction {
-        let mut unsigned = RlpStream::new_list(3);
+    /// Builds a full signed tx for a `data` payload the way the SDK will in v3: the hash is
+    /// Keccak-256 over the unsigned `[from (no 0x), nonce, chain_id, data]` preimage, so these
+    /// bytes are self-consistent by construction.
+    fn sdk_style_tx(from_clean: &str, nonce: u64, chain_id: u64, data_rlp: &[u8]) -> Transaction {
+        let mut unsigned = RlpStream::new_list(4);
         unsigned.append(&from_clean.to_string());
         unsigned.append(&nonce);
+        unsigned.append(&chain_id);
         unsigned.append_raw(data_rlp, 1);
         let mut hasher = Keccak256::new();
         hasher.update(unsigned.out().as_ref());
         let hash_hex = hex::encode(hasher.finalize());
 
         let dummy = "cd".repeat(32);
-        let mut full = RlpStream::new_list(7);
+        let mut full = RlpStream::new_list(8);
         full.append(&from_clean.to_string());
         full.append(&nonce);
+        full.append(&chain_id);
         full.append(&dummy);
         full.append(&dummy);
         full.append(&28u64);
@@ -425,7 +826,7 @@ mod tests {
         fc.append(&1u8); // RideRequest
         fc.append_raw(args.as_ref(), 1);
 
-        let tx = sdk_style_tx(WIRE_FROM, 4, fc.out().as_ref());
+        let tx = sdk_style_tx(WIRE_FROM, 4, 2077, fc.out().as_ref());
         assert!(
             tx.verify_hash().is_ok(),
             "node rejected an SDK RideRequest carrying the Hub-API-injected referrer: {:?}",
@@ -445,7 +846,7 @@ mod tests {
         fc.append(&2u8); // RideOffer
         fc.append_raw(args.as_ref(), 1);
 
-        let tx = sdk_style_tx(WIRE_FROM, 5, fc.out().as_ref());
+        let tx = sdk_style_tx(WIRE_FROM, 5, 2077, fc.out().as_ref());
         assert!(
             tx.verify_hash().is_ok(),
             "node rejected an SDK RideOffer carrying the Hub-API-injected referrer: {:?}",

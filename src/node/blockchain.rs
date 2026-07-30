@@ -11,6 +11,7 @@ use crate::node::balance_effect::{get_account_balance_effects, load_block_effect
 use crate::node::database::Database;
 use crate::node::file_utils::write_to_file;
 use crate::node::node_services::NodeServices;
+use crate::node::transactions::chain_init::ChainInit;
 use crate::node::transactions::ride_acceptance::{AvailableActiveTrip, AvailableRecentTrip, RideAcceptance};
 use crate::node::transactions::ride_offer::{AvailableRideOffer, RideOffer};
 use crate::node::transactions::ride_request::{AvailableRideRequest, MapBounds, RideRequest};
@@ -23,9 +24,7 @@ pub struct Blockchain {
     consensus: Aura,
     author_public_key: String,
     author_secret_key: String,
-    block_reward_amount: u64,
-    ride_request_referrer_fee_percent: u8,
-    ride_offer_referrer_fee_percent: u8,
+    chain_init: ChainInit,
 }
 
 impl Blockchain {
@@ -35,10 +34,25 @@ impl Blockchain {
         author_secret_key: String,
         developer_mode: bool,
         authorities: Vec<String>,
-        block_reward_amount: u64,
-        ride_request_referrer_fee_percent: u8,
-        ride_offer_referrer_fee_percent: u8,
+        chain_init: ChainInit,
     ) -> Blockchain {
+        // Fail loudly at boot on inconsistent economics — spec §4.5. Genesis must never
+        // be importable with a mainnet flag and a faucet pre-mint.
+        assert!(
+            chain_init.ride_request_referrer_fee_bps as u32
+                + chain_init.ride_offer_referrer_fee_bps as u32
+                <= 10_000,
+            "referrer fee bps sum exceeds 100%"
+        );
+        assert!(
+            chain_init.faucet_allocation <= i64::MAX as u64,
+            "faucet_allocation exceeds i64::MAX (balance deltas are i64)"
+        );
+        assert!(
+            chain_init.is_testnet || chain_init.faucet_allocation == 0,
+            "non-testnet chain must have zero faucet_allocation (a surviving faucet pre-mint destroys the peg)"
+        );
+
         let db = Database::new_db(&name);
         let step_duration = 60 / authorities.len() as u64;
         let blockchain = Blockchain {
@@ -48,13 +62,30 @@ impl Blockchain {
             consensus: Aura::new(authorities, step_duration),
             author_public_key,
             author_secret_key,
-            block_reward_amount,
-            ride_request_referrer_fee_percent,
-            ride_offer_referrer_fee_percent,
+            chain_init,
         };
 
-        Block::genesis_import_block(&blockchain.db);
+        Block::genesis_import_block(&blockchain.db, &blockchain.chain_init);
+
+        // A DB from before this release has a genesis block but no chain_params state key
+        // (genesis_import_block no-ops when a genesis block already exists). Every later
+        // add_block_to_chain would then fail quietly, forever. Fail loudly at boot instead.
+        if let Err(e) = ChainInit::get(&blockchain.db) {
+            panic!(
+                "chain_params missing from state after genesis import ({}); this database predates \
+                 the ChainInit release and must be wiped (delete the DB directory and restart)",
+                e
+            );
+        }
+
         blockchain
+    }
+
+    /// Consensus params + total supply, read from state (post-genesis truth).
+    pub fn get_chain_info(&self) -> Result<(ChainInit, u64), String> {
+        let params = ChainInit::get(&self.db)?;
+        let supply = ChainInit::get_total_supply(&self.db)?;
+        Ok((params, supply))
     }
 
     pub fn get_latest_block(&self) -> Result<Option<Block>, String> {
@@ -116,13 +147,7 @@ impl Blockchain {
         self.consensus.verify_block_author(&block)?;
         block.validate_block(&self.db)?;
         Transaction::validate_transactions(&self.db, &block.transactions)?;
-        Block::add_block_to_chain(
-            &self.db,
-            block,
-            self.block_reward_amount,
-            self.ride_request_referrer_fee_percent,
-            self.ride_offer_referrer_fee_percent,
-        )?;
+        Block::add_block_to_chain(&self.db, block)?;
 
         Ok(())
     }
@@ -142,18 +167,6 @@ impl Blockchain {
 
     pub fn get_blocks_by_indexes(&self, indexes: Vec<usize>) -> Result<Vec<Block>, String> {
         Block::get_blocks_by_indexes(&self.db, indexes)
-    }
-
-    pub fn block_reward_amount(&self) -> u64 {
-        self.block_reward_amount
-    }
-
-    pub fn ride_request_referrer_fee_percent(&self) -> u8 {
-        self.ride_request_referrer_fee_percent
-    }
-
-    pub fn ride_offer_referrer_fee_percent(&self) -> u8 {
-        self.ride_offer_referrer_fee_percent
     }
 
     #[allow(dead_code)]
@@ -225,11 +238,24 @@ impl Blockchain {
         };
 
         let index = latest_block.index + 1;
-        let previous_hash = latest_block.hash;
+        let previous_hash = latest_block.hash.clone();
         let transactions = match TransactionPool::get_transactions(&self.db) {
-            Ok(transactions) => Self::one_tx_per_sender(transactions),
+            Ok(transactions) => Self::drop_intra_block_conflicts(&self.db, transactions),
             Err(e) => return Err(format!("Failed to get transactions from pool: {}", e)),
         };
+
+        // Empty blocks are legal and necessary — confirmation depth is counted in blocks, so a
+        // chain that stops producing them when idle can never confirm what is already on it (see
+        // `Transaction::validate_transactions` for how that stalled the mint credit path). But
+        // they are a heartbeat, not throughput: this loop ticks every second while a slot lasts
+        // `step_duration` seconds, so emit at most ONE empty block per slot.
+        //
+        // Blocks WITH transactions are deliberately NOT rate-limited here — draining a busy pool
+        // across several blocks within one slot is how throughput is achieved at all, given the
+        // one-tx-per-sender-per-block ceiling.
+        if transactions.is_empty() && self.consensus.block_is_in_current_slot(&latest_block) {
+            return Err("Nothing to author: this slot already has a block".to_string());
+        }
 
         let mut new_block = Block::new_block(index, previous_hash, transactions);
         new_block.sign(&self.author_public_key, &self.author_secret_key);
@@ -237,16 +263,44 @@ impl Blockchain {
         Ok(new_block)
     }
 
-    /// Keep at most one pending tx per sender — the lowest nonce, tie-broken by hash for
-    /// determinism — so an authored block never contains two txs from the same account.
-    /// `Transaction::validate_transactions` rejects such blocks (deferred-batch staleness
-    /// mints CLT); without this the author would keep drafting a block the pool makes
-    /// invalid and never make progress. Extra same-account txs stay in the pool for later
-    /// blocks. ponytail: one tx/account/block; lift with incremental intra-block state.
-    fn one_tx_per_sender(mut transactions: Vec<Transaction>) -> Vec<Transaction> {
+    /// Authoring-time counterpart to the block-level guards in
+    /// `Transaction::validate_transactions`: drop pending txs that cannot legally share a
+    /// block, keeping at most one per sender (deferred-batch staleness on the balance/nonce
+    /// mints CLT), at most one per exactly-once ref (two identical `processed_ref_{ref}`
+    /// writes collapse, breaking exactly-once across Mint and Burn), and at most one writer
+    /// per account balance (two txs from different senders writing one account collapse the
+    /// same way — the Burn reserve drain). Without this the author would keep drafting a block
+    /// its own validation rejects and never make progress.
+    ///
+    /// Ordering is lowest nonce, tie-broken by hash, so every node keeps the same winner;
+    /// the losers stay in the pool for a later block.
+    /// ponytail: one tx/account/block; lift with incremental intra-block state.
+    fn drop_intra_block_conflicts(
+        db: &Database,
+        mut transactions: Vec<Transaction>,
+    ) -> Vec<Transaction> {
+        use crate::node::transactions::address::canonical_account_address;
         transactions.sort_by(|a, b| a.nonce.cmp(&b.nonce).then_with(|| a.hash.cmp(&b.hash)));
-        let mut seen = std::collections::HashSet::new();
-        transactions.retain(|tx| seen.insert(tx.from.clone()));
+        let mut senders = std::collections::HashSet::new();
+        let mut refs = std::collections::HashSet::new();
+        let mut accounts = std::collections::HashSet::new();
+        transactions.retain(|tx| {
+            // Claim the slots only when the tx is actually kept: a dropped tx that had
+            // reserved its sender or its accounts would cascade into dropping innocent txs.
+            let sender = canonical_account_address(&tx.from);
+            let written = tx.written_accounts(db);
+            let keep = !senders.contains(&sender)
+                && tx.exactly_once_ref().map_or(true, |r| !refs.contains(r))
+                && written.iter().all(|a| !accounts.contains(a));
+            if keep {
+                senders.insert(sender);
+                if let Some(r) = tx.exactly_once_ref() {
+                    refs.insert(r.to_string());
+                }
+                accounts.extend(written);
+            }
+            keep
+        });
         transactions
     }
 
@@ -293,6 +347,7 @@ mod tests {
         Transaction::new_transaction(
             from.to_string(),
             nonce,
+            2077,
             FunctionCall::Transfer(Transfer {
                 to: to.to_string(),
                 value: 1,
@@ -300,13 +355,42 @@ mod tests {
         )
     }
 
+    fn burn(from: &str, nonce: u64, redemption_ref: Option<&str>) -> Transaction {
+        Transaction::new_transaction(
+            from.to_string(),
+            nonce,
+            2077,
+            FunctionCall::Burn(crate::node::transactions::burn::Burn {
+                amount: 1,
+                redemption_ref: redemption_ref.map(|r| r.to_string()),
+            }),
+        )
+    }
+
+    /// The filter needs a `Database` to resolve RidePay/RideCancel counterparties. None of
+    /// these cases reads state, so any empty DB will do — one per test so they can still run
+    /// in parallel, deleted at the end so re-runs start clean.
+    fn scratch_db(name: &str) -> Database {
+        let _ = std::fs::remove_dir_all(format!("{}.db", name));
+        Database::new_db(name)
+    }
+
+    fn drop_scratch(mut db: Database, name: &str) {
+        db.close();
+        db.delete_database(name).ok();
+    }
+
     #[test]
-    fn one_tx_per_sender_keeps_lowest_nonce() {
-        let kept = Blockchain::one_tx_per_sender(vec![
-            tf("0xA", 2, "0xC"),
-            tf("0xB", 5, "0xA"),
-            tf("0xA", 1, "0xB"),
-        ]);
+    fn drops_extra_tx_per_sender_keeping_lowest_nonce() {
+        let name = "clutch-node-test-conflicts-sender";
+        let db = scratch_db(name);
+        // Recipients are disjoint from every sender: two senders may share a block only if
+        // no account is written twice, which is a separate guard exercised below.
+        let kept = Blockchain::drop_intra_block_conflicts(
+            &db,
+            vec![tf("0xA", 2, "0xC"), tf("0xB", 5, "0xD"), tf("0xA", 1, "0xC")],
+        );
+        drop_scratch(db, name);
         assert_eq!(kept.len(), 2);
         let a = kept.iter().find(|t| t.from == "0xA").unwrap();
         assert_eq!(a.nonce, 1, "lowest-nonce tx kept per sender");
@@ -314,9 +398,62 @@ mod tests {
     }
 
     #[test]
-    fn one_tx_per_sender_collapses_duplicate_nonce_mint_vector() {
+    fn drops_duplicate_nonce_mint_vector() {
         // Same account, same nonce, different recipients — the double-spend/mint input.
-        let kept = Blockchain::one_tx_per_sender(vec![tf("0xA", 1, "0xB"), tf("0xA", 1, "0xC")]);
+        let name = "clutch-node-test-conflicts-nonce";
+        let db = scratch_db(name);
+        let kept = Blockchain::drop_intra_block_conflicts(
+            &db,
+            vec![tf("0xA", 1, "0xB"), tf("0xA", 1, "0xC")],
+        );
+        drop_scratch(db, name);
         assert_eq!(kept.len(), 1, "only one tx per sender survives block building");
+    }
+
+    #[test]
+    fn drops_second_claim_on_an_exactly_once_ref() {
+        // Two *different* senders, so the per-sender filter never fires — but one ref, whose
+        // marker write would collapse in the deferred batch. Without this the author drafts
+        // a block `validate_transactions` then rejects, and never makes progress.
+        let name = "clutch-node-test-conflicts-ref";
+        let db = scratch_db(name);
+        let r = "a".repeat(64);
+        let kept = Blockchain::drop_intra_block_conflicts(
+            &db,
+            vec![burn("0xA", 1, Some(&r)), burn("0xB", 1, Some(&r))],
+        );
+        drop_scratch(db, name);
+        assert_eq!(kept.len(), 1, "one claim per ref survives block building");
+    }
+
+    #[test]
+    fn keeps_every_ref_less_burn() {
+        // `None` is the absence of a ref, not a shared one — collapsing these would break
+        // the plain-burn path. Two burners only ever write their own balances, so the
+        // written-account guard must not fire either.
+        let name = "clutch-node-test-conflicts-plain-burn";
+        let db = scratch_db(name);
+        let kept = Blockchain::drop_intra_block_conflicts(
+            &db,
+            vec![burn("0xA", 1, None), burn("0xB", 1, None)],
+        );
+        drop_scratch(db, name);
+        assert_eq!(kept.len(), 2, "ref-less burns never conflict");
+    }
+
+    #[test]
+    fn defers_the_second_writer_of_one_account() {
+        // The reserve-drain shape, at the authoring layer: a Burn by 0xA and a Transfer TO
+        // 0xA from another sender both write `account_state_0xa`. The author must keep one
+        // and leave the other pooled, or it drafts a block its own validation rejects.
+        let name = "clutch-node-test-conflicts-shared-account";
+        let db = scratch_db(name);
+        let kept = Blockchain::drop_intra_block_conflicts(
+            &db,
+            vec![burn("0xA", 1, None), tf("0xB", 2, "0xA")],
+        );
+        drop_scratch(db, name);
+        assert_eq!(kept.len(), 1, "only one writer of 0xA may land");
+        assert_eq!(kept[0].from, "0xA", "lowest nonce wins, deterministically");
     }
 }

@@ -1,5 +1,8 @@
 pub mod address;
+pub mod burn;
+pub mod chain_init;
 pub mod function_call;
+pub mod mint;
 pub mod passenger_concurrent;
 pub mod ride_acceptance;
 pub mod ride_cancel;

@@ -132,6 +132,9 @@ impl WebSocket {
             "get_block_by_index" => {
                 Self::handle_get_block_by_index(params, id, blockchain).await
             }
+            "get_chain_info" => {
+                Self::handle_get_chain_info(id, blockchain).await
+            }
             "list_ride_requests" => {
                 Self::handle_list_ride_requests(params, id, blockchain).await
             }
@@ -355,11 +358,8 @@ impl WebSocket {
         match blockchain.get_blocks_by_indexes(vec![params.index]) {
             Ok(blocks) => {
                 if let Some(block) = blocks.into_iter().next() {
-                    let block_reward = if block.index == 0 {
-                        0
-                    } else {
-                        blockchain.block_reward_amount()
-                    };
+                    // ponytail: block rewards removed; field kept as 0 until clutch-explorer drops it.
+                    let block_reward: u64 = 0;
                     let reward_recipient = block.author.clone();
                     let mut block_value =
                         serde_json::to_value(&block).unwrap_or(serde_json::Value::Null);
@@ -417,6 +417,38 @@ impl WebSocket {
             }
             Err(e) => {
                 let error_msg = format!("Failed to get block by index {}: {}", params.index, e);
+                error!("{}", error_msg);
+                Some(json_rpc_error_response(-32000, &error_msg, id))
+            }
+        }
+    }
+
+    async fn handle_get_chain_info(
+        id: serde_json::Value,
+        blockchain: &Arc<Mutex<Blockchain>>,
+    ) -> Option<String> {
+        let blockchain = blockchain.lock().await;
+        let latest_index = match blockchain.get_latest_block() {
+            Ok(Some(b)) => b.index,
+            // Genuinely empty chain: no block yet, 0 is correct.
+            Ok(None) => 0,
+            // A read failure is not a fresh chain: answering 0 with a 200 OK would report a
+            // corrupt/unreadable DB as a healthy freshly-initialized one, and a treasury
+            // reconciliation job would conclude the chain has no blocks. Surface the error,
+            // like the `get_chain_info()` arm below.
+            Err(e) => {
+                let error_msg = format!("Failed to read latest block: {}", e);
+                error!("get_chain_info: {}", error_msg);
+                return Some(json_rpc_error_response(-32000, &error_msg, id));
+            }
+        };
+        match blockchain.get_chain_info() {
+            Ok((params, total_supply)) => Some(json_rpc_success_response(
+                build_chain_info_response(&params, total_supply, latest_index),
+                id,
+            )),
+            Err(e) => {
+                let error_msg = format!("Failed to get chain info: {}", e);
                 error!("{}", error_msg);
                 Some(json_rpc_error_response(-32000, &error_msg, id))
             }
@@ -632,4 +664,31 @@ fn json_rpc_success_response(result: serde_json::Value, id: serde_json::Value) -
         "id": id
     })
     .to_string()
+}
+
+// Builds the JSON response body for get_chain_info RPC, ensuring total_supply
+// is encoded as a decimal string (never a bare number) to avoid precision loss
+// past 2^53. Other fields stay as bare numbers.
+pub fn build_chain_info_response(
+    params: &crate::node::transactions::chain_init::ChainInit,
+    total_supply: u64,
+    latest_block_index: usize,
+) -> serde_json::Value {
+    serde_json::json!({
+        "chain_id": params.chain_id,
+        "is_testnet": params.is_testnet,
+        "tx_fee": params.tx_fee,
+        "ride_request_referrer_fee_bps": params.ride_request_referrer_fee_bps,
+        "ride_offer_referrer_fee_bps": params.ride_offer_referrer_fee_bps,
+        "mint_authority": params.mint_authority,
+        // Decimal string, not a bare number: total_supply is the one field here
+        // that can realistically exceed 2^53 (~9.007e15, ~$9B at this peg's 1
+        // USD = 1,000,000 CLT), where a JSON number rounds silently and the
+        // treasury's daily reconciliation treats a supply mismatch as a P1 - a
+        // silent round would fabricate or mask one. The other fields (chain_id,
+        // tx_fee, both bps rates, latest_block_index) can't approach that bound
+        // (a block/sec needs ~285M years to get there), so they stay bare numbers.
+        "total_supply": total_supply.to_string(),
+        "latest_block_index": latest_block_index,
+    })
 }

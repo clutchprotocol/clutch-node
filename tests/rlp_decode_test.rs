@@ -1,31 +1,71 @@
 #[cfg(test)]
 mod tests {
+    use clutch_node::node::transactions::burn::Burn;
     use clutch_node::node::transactions::function_call::FunctionCall;
+    use clutch_node::node::transactions::mint::Mint;
     use clutch_node::node::transactions::ride_request::RideRequest;
-    use hex;    
+    use hex;
+    use rlp::{Decodable, Encodable, Rlp, RlpStream};
+    use sha3::{Digest, Keccak256};
     use clutch_node::node::{coordinate, rlp_encoding};
     use clutch_node::node::transactions::transaction::Transaction;
     use std::str::from_utf8;
     const PASSENGER_ADDRESS_KEY: &str = "0xdeb4cfb63db134698e1879ea24904df074726cc0";
-    const PASSENGER_SECRET_KEY: &str ="d2c446110cfcecbdf05b2be528e72483de5b6f7ef9c7856df2f81f48e9f2748f";    
-   
+    const PASSENGER_SECRET_KEY: &str ="d2c446110cfcecbdf05b2be528e72483de5b6f7ef9c7856df2f81f48e9f2748f";
+
     #[test]
     fn decode_rlp_to_transaction_struct() {
-        // Example RLP-encoded transaction hex (replace with your actual test vector if needed)        
-        let rlp_hex = "0xf9010994deb4cfb63db134698e1879ea24904df074726cc002b84065633261346332363133373836336564363330306361316236626666333266363063653562316530306631366661616337663063353738326536373963303166b840376132636365346234353637383865306535393933383533373361303036636263306433653135343064366264313664356561646262643638623733666230641cb84035333134653461653437656262653230663862663233356531353266363135366461636435666163616131303836656461396664633631663163356162393834eb01e9d288403b300b626d50c988404c2529f6b47e10d288403b35ac4197d81888404c2b187e7693508203e8";
-        let rlp_bytes = hex::decode(rlp_hex.trim_start_matches("0x")).expect("Invalid hex");
+        // Build an 8-item fixture the same way `sdk_style_tx` in transaction.rs does: a 4-item
+        // preimage `[from (no 0x), nonce, chain_id, data]`, Keccak-256 that, then the 8-item
+        // wire list `[from, nonce, chain_id, signature_r, signature_s, signature_v, hash, data]`
+        // with chain_id at index 2. This is the current wire contract (Task 4); the old 7-item
+        // fixture predated chain_id and could only ever decode to Err.
+        let from_clean = "deb4cfb63db134698e1879ea24904df074726cc0";
+        let nonce: u64 = 1;
+        let chain_id: u64 = 2077;
+
+        let function_call = FunctionCall::Transfer(
+            clutch_node::node::transactions::transfer::Transfer {
+                to: "0x8f19077627cde4848b090c53c83b12956837d5e9".to_string(),
+                value: 10,
+            },
+        );
+        let mut data_stream = RlpStream::new();
+        function_call.rlp_append(&mut data_stream);
+        let data_rlp = data_stream.out();
+
+        let mut unsigned = RlpStream::new_list(4);
+        unsigned.append(&from_clean.to_string());
+        unsigned.append(&nonce);
+        unsigned.append(&chain_id);
+        unsigned.append_raw(data_rlp.as_ref(), 1);
+        let mut hasher = Keccak256::new();
+        hasher.update(unsigned.out().as_ref());
+        let hash_hex = hex::encode(hasher.finalize());
+
+        let dummy = "cd".repeat(32);
+        let mut full = RlpStream::new_list(8);
+        full.append(&from_clean.to_string());
+        full.append(&nonce);
+        full.append(&chain_id);
+        full.append(&dummy);
+        full.append(&dummy);
+        full.append(&27u64);
+        full.append(&hash_hex);
+        full.append_raw(data_rlp.as_ref(), 1);
+        let rlp_bytes = full.out().to_vec();
 
         // Debug print: show each RLP field
         let rlp = rlp::Rlp::new(&rlp_bytes);
         println!("RLP item count: {}", rlp.item_count().unwrap_or(0));
-        
+
         // Enhanced debugging to understand the structure better
         println!("Top level is list: {}", rlp.is_list());
-        
+
         // Investigate each field to find any RLP structure issues
         for i in 0..rlp.item_count().unwrap_or(0) {
             let val = rlp.at(i).unwrap();
-            
+
             // Get the bytes directly
             if let Ok(data) = val.data() {
                 if let Ok(str_val) = from_utf8(data) {
@@ -35,16 +75,16 @@ mod tests {
                 }
             } else if val.is_list() {
                 println!("Field {}: List with {} items", i, val.item_count().unwrap_or(0));
-                
-                // If this is field 6 (data field), print more details
-                if i == 6 {
+
+                // If this is field 7 (data field), print more details
+                if i == 7 {
                     println!("  Data field structure:");
                     // Check if it follows the expected structure [tag, args]
                     if val.item_count().unwrap_or(0) >= 2 {
                         if let Ok(tag) = val.at(0).unwrap().as_val::<u8>() {
                             println!("  Tag: {}", tag);
                         }
-                        
+
                         let args = val.at(1).unwrap();
                         if args.is_list() {
                             println!("  Args is a list with {} items", args.item_count().unwrap_or(0));
@@ -58,20 +98,19 @@ mod tests {
             }
         }
 
-        // Decode to Transaction struct
-        match rlp_encoding::decode::<Transaction>(&rlp_bytes) {
-            Ok(tx) => println!("Decoded Transaction: {:#?}", tx),
-            Err(e) => {
-                println!("Failed to decode RLP to Transaction: {:?}", e);
-                // Print more details about expected structure
-                println!("Expected RLP structure for Transaction:");
-                println!("- 7 items in top-level list");
-                println!("- Fields: [from, nonce, signature_r, signature_s, signature_v, hash, data]");
-                println!("- 'data' should be a list [tag, args] where:");
-                println!("  - tag is a u8 (0-5, 8) indicating function call type");
-                println!("  - args varies depending on tag");
-            },
-        }
+        // Decode to Transaction struct and assert on the current 8-item, chain_id-bearing contract.
+        let tx = rlp_encoding::decode::<Transaction>(&rlp_bytes).unwrap_or_else(|e| {
+            panic!(
+                "Failed to decode RLP to Transaction: {:?}. Expected RLP structure: \
+                 8 items [from, nonce, chain_id, signature_r, signature_s, signature_v, hash, data] \
+                 with chain_id at index 2 and 'data' a list [tag, args].",
+                e
+            )
+        });
+        println!("Decoded Transaction: {:#?}", tx);
+        assert_eq!(tx.chain_id, chain_id, "chain_id must round-trip through decode");
+        assert_eq!(tx.from, format!("0x{}", from_clean), "from must round-trip through decode");
+        assert_eq!(tx.nonce, nonce, "nonce must round-trip through decode");
     }
 
     
@@ -94,6 +133,7 @@ fn test_rlp_encode_ride_request_transaction() {
     let mut tx = Transaction::new_transaction(
         PASSENGER_ADDRESS_KEY.to_string(),
         1,
+        2077,
         FunctionCall::RideRequest(ride_request),
     );
     // Sign with passenger's secret key
@@ -107,6 +147,110 @@ fn test_rlp_encode_ride_request_transaction() {
     match rlp_encoding::decode::<Transaction>(&encoded) {
         Ok(decoded_tx) => println!("Successfully decoded our own transaction: {:?}", decoded_tx),
         Err(e) => println!("Failed to decode our own transaction: {:?}", e),
+    }
+}
+
+#[test]
+fn mint_rlp_round_trip_pins_wire_contract() {
+    // Mint's encoding is a cross-repo byte-match contract (Treasury Service + JS SDK):
+    // tag 6, 3-item arg list `[to, amount, credit_ref]`. Nothing else in the suite pins
+    // the tag/arity — Task 4 shipped a wrong contract statement precisely because no test
+    // did. Round-trip the fields, then decode the raw structure independently of the
+    // round-trip so a bug that happens to cancel out on both sides can't hide.
+    let mint = Mint {
+        to: "0x4444444444444444444444444444444444444444".to_string(),
+        amount: 5_000_000,
+        credit_ref: "aa".repeat(32),
+    };
+    let function_call = FunctionCall::Mint(mint.clone());
+
+    let mut stream = RlpStream::new();
+    function_call.rlp_append(&mut stream);
+    let encoded = stream.out();
+
+    // Structural check: [tag, args] with tag == 6 and args a 3-item list, read directly
+    // off the wire bytes rather than only through the round-trip below.
+    let rlp = Rlp::new(&encoded);
+    assert!(rlp.is_list(), "FunctionCall wire form must be a list");
+    assert_eq!(rlp.item_count().unwrap(), 2, "FunctionCall wire form is [tag, args]");
+    let tag: u8 = rlp.val_at(0).unwrap();
+    assert_eq!(tag, 6, "Mint's RLP tag must be 6");
+    let args = rlp.at(1).unwrap();
+    assert!(args.is_list(), "Mint args must be a list");
+    assert_eq!(args.item_count().unwrap(), 3, "Mint args must be [to, amount, credit_ref]");
+
+    // Round-trip check: decode back through FunctionCall and confirm all three fields survive.
+    let decoded = FunctionCall::decode(&Rlp::new(&encoded)).expect("decode Mint FunctionCall");
+    match decoded {
+        FunctionCall::Mint(decoded_mint) => {
+            assert_eq!(decoded_mint.to, mint.to, "to must round-trip");
+            assert_eq!(decoded_mint.amount, mint.amount, "amount must round-trip");
+            assert_eq!(decoded_mint.credit_ref, mint.credit_ref, "credit_ref must round-trip");
+        }
+        other => panic!("expected FunctionCall::Mint, got {:?}", other),
+    }
+}
+
+#[test]
+fn burn_rlp_round_trip_pins_wire_contract() {
+    // Burn's encoding is the same kind of cross-repo byte-match contract as Mint (Treasury
+    // Service + JS SDK): tag 7, 2-item arg list `[amount, redemption_ref-or-empty-string]`.
+    // Covers both the redemption case (ref present) and the plain-burn case (ref is None,
+    // which must be the empty string on the wire, not an absent/optional RLP item) so a
+    // sign or arity slip in either direction shows up here.
+    let burn_with_ref = Burn {
+        amount: 2_000_000,
+        redemption_ref: Some("bb".repeat(32)),
+    };
+    let function_call = FunctionCall::Burn(burn_with_ref.clone());
+
+    let mut stream = RlpStream::new();
+    function_call.rlp_append(&mut stream);
+    let encoded = stream.out();
+
+    let rlp = Rlp::new(&encoded);
+    assert!(rlp.is_list(), "FunctionCall wire form must be a list");
+    assert_eq!(rlp.item_count().unwrap(), 2, "FunctionCall wire form is [tag, args]");
+    let tag: u8 = rlp.val_at(0).unwrap();
+    assert_eq!(tag, 7, "Burn's RLP tag must be 7");
+    let args = rlp.at(1).unwrap();
+    assert!(args.is_list(), "Burn args must be a list");
+    assert_eq!(args.item_count().unwrap(), 2, "Burn args must be [amount, redemption_ref]");
+    let ref_on_wire: String = args.val_at(1).unwrap();
+    assert_eq!(ref_on_wire, "bb".repeat(32), "redemption_ref is written as a plain string, not wrapped");
+
+    let decoded = FunctionCall::decode(&Rlp::new(&encoded)).expect("decode Burn FunctionCall");
+    match decoded {
+        FunctionCall::Burn(decoded_burn) => {
+            assert_eq!(decoded_burn.amount, burn_with_ref.amount, "amount must round-trip");
+            assert_eq!(
+                decoded_burn.redemption_ref, burn_with_ref.redemption_ref,
+                "redemption_ref must round-trip"
+            );
+        }
+        other => panic!("expected FunctionCall::Burn, got {:?}", other),
+    }
+
+    // Plain burn: None must serialize as an empty string on the wire and decode back to None.
+    let plain_burn = Burn {
+        amount: 100,
+        redemption_ref: None,
+    };
+    let mut stream = RlpStream::new();
+    FunctionCall::Burn(plain_burn.clone()).rlp_append(&mut stream);
+    let encoded = stream.out();
+
+    let rlp = Rlp::new(&encoded);
+    let args = rlp.at(1).unwrap();
+    let ref_on_wire: String = args.val_at(1).unwrap();
+    assert_eq!(ref_on_wire, "", "None must encode as the empty string, following the referrer convention");
+
+    let decoded = FunctionCall::decode(&Rlp::new(&encoded)).expect("decode plain Burn FunctionCall");
+    match decoded {
+        FunctionCall::Burn(decoded_burn) => {
+            assert_eq!(decoded_burn.redemption_ref, None, "empty string must decode back to None");
+        }
+        other => panic!("expected FunctionCall::Burn, got {:?}", other),
     }
 }
 } 

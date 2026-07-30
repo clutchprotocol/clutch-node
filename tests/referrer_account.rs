@@ -7,13 +7,6 @@ use clutch_node::node::{
 const LEGACY_REFERRER: &str = "0912514c7cc3eec2b2dab4e1d150c4b5eaee5a6f";
 const CANONICAL_REFERRER: &str = "0x0912514c7cc3eec2b2dab4e1d150c4b5eaee5a6f";
 
-fn referrer_fee_ceiling(percent: u8, fare: u64) -> u64 {
-    if percent == 0 || fare == 0 {
-        return 0;
-    }
-    (percent as u64 * fare + 99) / 100
-}
-
 #[test]
 fn canonical_account_address_adds_prefix() {
     assert_eq!(
@@ -29,12 +22,6 @@ fn optional_canonical_referrer_normalizes() {
         Some(CANONICAL_REFERRER)
     );
     assert!(optional_canonical_referrer(String::new()).is_none());
-}
-
-#[test]
-fn referrer_fee_ceiling_pays_on_small_fare() {
-    assert_eq!(referrer_fee_ceiling(2, 3), 1);
-    assert_eq!(referrer_fee_ceiling(2, 0), 0);
 }
 
 #[test]
@@ -82,14 +69,4 @@ fn update_account_state_writes_canonical_key() {
     // Clean up so re-runs start from an empty DB (this test is not idempotent otherwise).
     db.close();
     db.delete_database(name).ok();
-}
-
-#[test]
-fn merged_referrer_ceiling_fees_for_same_address() {
-    let fare = 3u64;
-    let request_fee = referrer_fee_ceiling(2, fare);
-    let offer_fee = referrer_fee_ceiling(2, fare);
-    assert_eq!(request_fee, 1);
-    assert_eq!(offer_fee, 1);
-    assert_eq!(request_fee + offer_fee, 2);
 }

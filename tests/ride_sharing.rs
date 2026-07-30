@@ -3,14 +3,14 @@ use clutch_node::node::{
     blocks::block::Block,
     coordinate,
     transactions::{
-        function_call::FunctionCall, ride_acceptance::RideAcceptance, ride_cancel::RideCancel,
-        ride_offer::RideOffer, ride_pay::RidePay, ride_request::RideRequest,
-        transaction::Transaction,
+        chain_init::ChainInit, function_call::FunctionCall, ride_acceptance::RideAcceptance,
+        ride_cancel::RideCancel, ride_offer::RideOffer, ride_pay::RidePay,
+        ride_request::RideRequest, transaction::Transaction, transfer::Transfer,
     },
 };
 use serial_test::serial;
 
-use ::tracing::{error, info};
+use ::tracing::info;
 
 const BLOCKCHAIN_NAME: &str = "clutch-node-test";
 
@@ -20,12 +20,6 @@ const PASSENGER_SECRET_KEY: &str =
 
 const DRIVER_ADDRESS_KEY: &str = "0x8f19077627cde4848b090c53c83b12956837d5e9";
 const DRIVER_SECRET_KEY: &str = "e74e3f87268132c7b3ddb24600716fc362f4519bf9986a9436aa8a1be58c7150";
-
-const RIDE_REQUEST_TX_HASH: &str =
-    "70d4cd23a2fc6c636ed1ac7744a7d58869ec95f7066d8441645821a0420f0164";
-const RIDE_OFFER_TX_HASH: &str = "c72839a57eeb93971409828845ef0b443ccb8f50a18ebf9559dba39c639633a7";
-const RIDE_ACCEPTANCE_TX_HASH: &str =
-    "856a5dae6fee5f249dbd144321ca28badd9297088d4927af27069e37a8cccdd9";
 
 const AUTHOR_1_PUBLIC_KEY: &str = "0x9b6e8afff8329743cac73dbef83ca3cbf9a74c20";
 const AUTHOR_1_SECRET_KEY: &str =
@@ -38,7 +32,19 @@ const AUTHOR_2_SECRET_KEY: &str =
 const AUTHOR_3_PUBLIC_KEY: &str = "0xc4f3f661a43e099aedb8e396d9de1a831a1b4adc";
 const AUTHOR_3_SECRET_KEY: &str =
     "2d75bdfabbbaa65d7a182968e579adf2566fbb6931411752dd834c56bbf092c9";
-const BLOCK_REWARD_AMOUNT: u64 = 50;
+
+fn ci() -> ChainInit {
+    ChainInit {
+        chain_id: 2077,
+        is_testnet: true,
+        tx_fee: 1000,
+        ride_request_referrer_fee_bps: 200,
+        ride_offer_referrer_fee_bps: 200,
+        mint_authority: AUTHOR_1_PUBLIC_KEY.to_string(),
+        faucet_address: PASSENGER_ADDRESS_KEY.to_string(),
+        faucet_allocation: 1_000_000_000_000_000,
+    }
+}
 
 #[test]
 #[serial]
@@ -52,47 +58,111 @@ fn test_ride_sharing_blockchain() {
 }
 
 fn import_blocks(blockchain: &mut Blockchain) {
-    let blocks = [
-        || ride_request_block(1, 1, 20),
-        || ride_offer_block(2, 1, 30),
-        || ride_acceptance_block(3, 2),
-        || ride_pay_block(4, 3, 5),  //5
-        || ride_pay_block(5, 4, 10), // 5 + 10 = 15
-        || ride_pay_block(6, 5, 10), // 15 + 10 = 25
-        || ride_cancel_block(7, 6),
-    ];
+    // Under the flat-fee rule a zero-balance sender fails validation, so the driver
+    // (who never receives anything otherwise in this flow) must be funded before its
+    // first RideOffer. This funding block shifts every later block's index +1 and the
+    // passenger's nonce +1 (it now consumes passenger nonce 1). Each downstream tx
+    // references its predecessor by that predecessor's REAL hash (captured off the
+    // built Transaction) rather than a hardcoded literal, since the hash commits to
+    // (from, nonce, chain_id, data) and nonces shifted.
+    let mut funding_block = faucet_to_driver_block(1, 1, 100_000);
+    import_block(blockchain, &mut funding_block).expect("block import failed: faucet->driver funding");
 
-    for block_creator in blocks.iter() {
-        let mut block = block_creator();
-        if let Err(e) = import_block(blockchain, &mut block) {
-            error!("Error importing block: {}", e);
-            break;
-        }
-    }
+    let ride_request_tx = ride_request_transcation(20, 2);
+    let ride_request_hash = ride_request_tx.hash.clone();
+    let mut block = Block::new_block(2, String::new(), vec![ride_request_tx]);
+    import_block(blockchain, &mut block).expect("block import failed: ride request");
+
+    let ride_offer_tx = ride_offer_transaction(30, 1, &ride_request_hash);
+    let ride_offer_hash = ride_offer_tx.hash.clone();
+    let mut block = Block::new_block(3, String::new(), vec![ride_offer_tx]);
+    // A swallowed import error here would let a dead flow (e.g. this RideOffer rejected
+    // for insufficient driver balance) report a passing test having executed nothing
+    // downstream. Fail hard instead.
+    import_block(blockchain, &mut block).expect("block import failed: ride offer");
+
+    let ride_acceptance_tx = ride_acceptance_transaction(3, &ride_offer_hash);
+    let ride_acceptance_hash = ride_acceptance_tx.hash.clone();
+    let mut block = Block::new_block(4, String::new(), vec![ride_acceptance_tx]);
+    import_block(blockchain, &mut block).expect("block import failed: ride acceptance");
+
+    let mut block = Block::new_block(
+        5,
+        String::new(),
+        vec![ride_pay_transaction(5, 4, &ride_acceptance_hash)], //5
+    );
+    import_block(blockchain, &mut block).expect("block import failed: ride pay 1");
+
+    let mut block = Block::new_block(
+        6,
+        String::new(),
+        vec![ride_pay_transaction(10, 5, &ride_acceptance_hash)], // 5 + 10 = 15
+    );
+    import_block(blockchain, &mut block).expect("block import failed: ride pay 2");
+
+    let mut block = Block::new_block(
+        7,
+        String::new(),
+        vec![ride_pay_transaction(10, 6, &ride_acceptance_hash)], // 15 + 10 = 25
+    );
+    import_block(blockchain, &mut block).expect("block import failed: ride pay 3");
+
+    let mut block = Block::new_block(
+        8,
+        String::new(),
+        vec![ride_cancel_transaction(7, &ride_acceptance_hash)],
+    );
+    import_block(blockchain, &mut block).expect("block import failed: ride cancel");
 }
 
 fn author_blocks(blockchain: &mut Blockchain) {
-    let ride_request_tx = ride_request_transcation(1, 7);
+    let ride_request_tx = ride_request_transcation(1, 8);
+    let pooled_hash = ride_request_tx.hash.clone();
     add_transaction_to_pool(&blockchain, ride_request_tx);
 
-    match blockchain.author_new_block() {
-        Ok(mut block) => match import_block(blockchain, &mut block) {
-            Ok(_) => info!("Successfully imported the new block."),
-            Err(e) => error!("Failed to import the new block: {}", e),
-        },
-        Err(e) => error!("Failed to author new block: {}", e),
+    // author_new_block already imports the block internally (Blockchain::author_new_block
+    // calls self.import_block before returning) — importing it again here re-signs an
+    // already-committed block against whatever slot the wall clock has since rotated to,
+    // which always fails. The original swallowed-error pattern hid this dead second import
+    // AND hid a pre-existing, unrelated timing gap this task doesn't own: this fixture's
+    // node is fixed to AUTHOR_1's identity, but Aura picks the author by wall-clock slot
+    // across all 3 authorities (step_duration = 20s), so author_new_block only succeeds
+    // when AUTHOR_1's slot happens to be current. Poll for it instead of asserting on the
+    // first tick — bounded to just over one full rotation so it can't hang.
+    // ponytail: real-clock poll, not a proper test clock. Fine for an integration test;
+    // revisit if Aura ever grows an injectable clock.
+    let mut last_err = String::new();
+    let mut authored = None;
+    for _ in 0..300 {
+        match blockchain.author_new_block() {
+            Ok(block) => {
+                authored = Some(block);
+                break;
+            }
+            Err(e) => {
+                last_err = e;
+                std::thread::sleep(std::time::Duration::from_millis(200));
+            }
+        }
     }
+    // Keep the block: discarding it let the loop pass while authoring an empty block, so a
+    // pool regression that never drained the pending tx would still report green.
+    let block = authored.unwrap_or_else(|| {
+        panic!("failed to author new block after polling for a full Aura rotation: {}", last_err)
+    });
+    assert_eq!(block.transactions.len(), 1, "authored block must carry the pooled transaction");
+    assert_eq!(block.transactions[0].hash, pooled_hash);
+    info!("Successfully imported the new block.");
 }
 
 fn add_transaction_to_pool(blockchain: &Blockchain, ride_request_transcation: Transaction) {
-    match blockchain.add_transaction_to_pool(&ride_request_transcation) {
-        Ok(_) => {
-            info!("Successfully added transaction to transaction_pool");
-        }
-        Err(e) => {
-            error!("Failed to add transaction to transaction_pool: {}", e);
-        }
-    }
+    // Same hard-failure principle as import_block: a swallowed error here would let
+    // author_new_block silently draft an empty block and the test would still pass
+    // having authored nothing.
+    blockchain
+        .add_transaction_to_pool(&ride_request_transcation)
+        .expect("failed to add transaction to transaction_pool");
+    info!("Successfully added transaction to transaction_pool");
 }
 
 fn new_blockchain() -> Blockchain {
@@ -107,9 +177,7 @@ fn new_blockchain() -> Blockchain {
         AUTHOR_1_SECRET_KEY.to_string(),
         true,
         authorities,
-        BLOCK_REWARD_AMOUNT,
-        2,
-        2,
+        ci(),
     );
     blockchain
 }
@@ -151,9 +219,18 @@ fn current_author_keys(blockchain: &Blockchain) -> Option<(&str, &str)> {
     None
 }
 
-fn ride_request_block(index: usize, nonce: u64, fare: u64) -> Block {
-    let ride_request_transcation = ride_request_transcation(fare, nonce);
-    Block::new_block(index, String::new(), vec![ride_request_transcation])
+fn faucet_to_driver_block(index: usize, nonce: u64, value: u64) -> Block {
+    let mut transfer_transaction = Transaction::new_transaction(
+        PASSENGER_ADDRESS_KEY.to_string(),
+        nonce,
+        2077,
+        FunctionCall::Transfer(Transfer {
+            to: DRIVER_ADDRESS_KEY.to_string(),
+            value,
+        }),
+    );
+    transfer_transaction.sign(PASSENGER_SECRET_KEY);
+    Block::new_block(index, String::new(), vec![transfer_transaction])
 }
 
 fn ride_request_transcation(fare: u64, nonce: u64) -> Transaction {
@@ -173,6 +250,7 @@ fn ride_request_transcation(fare: u64, nonce: u64) -> Transaction {
     let mut ride_request_transcation = Transaction::new_transaction(
         PASSENGER_ADDRESS_KEY.to_string(),
         nonce,
+        2077,
         FunctionCall::RideRequest(ride_request),
     );
 
@@ -180,79 +258,63 @@ fn ride_request_transcation(fare: u64, nonce: u64) -> Transaction {
     ride_request_transcation
 }
 
-fn ride_offer_block(index: usize, nonce: u64, fare: u64) -> Block {
-    let ride_offer_transaction: Transaction = ride_offer_transaction(fare, nonce);
-    Block::new_block(index, String::new(), vec![ride_offer_transaction])
-}
-
-fn ride_offer_transaction(fare: u64, nonce: u64) -> Transaction {
+fn ride_offer_transaction(fare: u64, nonce: u64, ride_request_tx_hash: &str) -> Transaction {
     let ride_offer = RideOffer {
         fare: fare,
-        ride_request_transaction_hash: RIDE_REQUEST_TX_HASH.to_string(),
+        ride_request_transaction_hash: ride_request_tx_hash.to_string(),
         referrer: None,
     };
 
     let mut ride_offer_transaction = Transaction::new_transaction(
         DRIVER_ADDRESS_KEY.to_string(),
         nonce,
+        2077,
         FunctionCall::RideOffer(ride_offer),
     );
     ride_offer_transaction.sign(DRIVER_SECRET_KEY);
     ride_offer_transaction
 }
 
-fn ride_acceptance_block(index: usize, nonce: u64) -> Block {
-    let ride_acceptance_transaction = ride_acceptance_transaction(nonce);
-    Block::new_block(index, String::new(), vec![ride_acceptance_transaction])
-}
-
-fn ride_acceptance_transaction(nonce: u64) -> Transaction {
+fn ride_acceptance_transaction(nonce: u64, ride_offer_tx_hash: &str) -> Transaction {
     let ride_acceptance = RideAcceptance {
-        ride_offer_transaction_hash: RIDE_OFFER_TX_HASH.to_string(),
+        ride_offer_transaction_hash: ride_offer_tx_hash.to_string(),
     };
 
     let mut ride_acceptance_transaction = Transaction::new_transaction(
         PASSENGER_ADDRESS_KEY.to_string(),
         nonce,
+        2077,
         FunctionCall::RideAcceptance(ride_acceptance),
     );
     ride_acceptance_transaction.sign(PASSENGER_SECRET_KEY);
     ride_acceptance_transaction
 }
 
-fn ride_pay_block(index: usize, nonce: u64, fare: u64) -> Block {
-    let ride_pay_transaction = ride_pay_transaction(fare, nonce);
-    Block::new_block(index, String::new(), vec![ride_pay_transaction])
-}
-
-fn ride_pay_transaction(fare: u64, nonce: u64) -> Transaction {
+fn ride_pay_transaction(fare: u64, nonce: u64, ride_acceptance_tx_hash: &str) -> Transaction {
     let ride_pay = RidePay {
         fare: fare,
-        ride_acceptance_transaction_hash: RIDE_ACCEPTANCE_TX_HASH.to_string(),
+        ride_acceptance_transaction_hash: ride_acceptance_tx_hash.to_string(),
     };
 
     let mut ride_pay_transaction = Transaction::new_transaction(
         PASSENGER_ADDRESS_KEY.to_string(),
         nonce,
+        2077,
         FunctionCall::RidePay(ride_pay),
     );
     ride_pay_transaction.sign(PASSENGER_SECRET_KEY);
     ride_pay_transaction
 }
 
-fn ride_cancel_block(index: usize, nonce: u64) -> Block {
-    let ride_cancel_transaction = ride_cancel_transaction(nonce);
-    Block::new_block(index, String::new(), vec![ride_cancel_transaction])
-}
-
-fn ride_cancel_transaction(nonce: u64) -> Transaction {
+fn ride_cancel_transaction(nonce: u64, ride_acceptance_tx_hash: &str) -> Transaction {
     let ride_cancel = RideCancel {
-        ride_acceptance_transaction_hash: RIDE_ACCEPTANCE_TX_HASH.to_string(),
+        ride_acceptance_transaction_hash: ride_acceptance_tx_hash.to_string(),
     };
 
     let mut ride_cancel_transaction = Transaction::new_transaction(
         PASSENGER_ADDRESS_KEY.to_string(),
         nonce,
+        2077,
         FunctionCall::RideCancel(ride_cancel),
     );
 

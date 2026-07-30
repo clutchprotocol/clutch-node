@@ -1,0 +1,4 @@
+# Test-runner image: rocksdb (librocksdb-sys) needs clang/libclang for bindgen.
+FROM rust:1.86-bookworm
+RUN apt-get update && apt-get install -y clang libclang-dev && rm -rf /var/lib/apt/lists/*
+WORKDIR /app

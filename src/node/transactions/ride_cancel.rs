@@ -94,8 +94,10 @@ impl RideCancel {
 
     pub fn state_transaction(
         &self,
+        from: &String,
         tx_hash: &String,
         db: &Database,
+        fee: u64,
     ) -> Vec<StateUpdate> {
         let ride_cancel_key = Self::construct_ride_cancel_key(&tx_hash);
         let ride_cancel_value = serde_json::to_string(&self)
@@ -135,19 +137,45 @@ impl RideCancel {
 
         let remaining_amount = (ride_offer.fare as i64) - (fare_paid as i64);
 
-        let passenger_update = AccountState::apply_balance_change(
-            &passenger,
-            remaining_amount,
-            BalanceEffectKind::RideCancelRefund,
-            None,
-            db,
-        );
+        use crate::node::transactions::address::canonical_account_address;
+        let sender_is_passenger =
+            canonical_account_address(from) == canonical_account_address(&passenger);
 
-        vec![
+        // ponytail: when the passenger cancels, refund credit and fee debit hit the SAME
+        // account — merge into one write. Driver-cancel: driver's key is otherwise
+        // untouched, standalone fee debit is safe.
+        let mut updates = vec![
             StateUpdate::storage_only(ride_cancel_key, ride_cancel_value),
-            passenger_update,
             StateUpdate::storage_only(ride_acceptance_cancel_key, ride_acceptance_cancel_value),
-        ]
+        ];
+        if sender_is_passenger {
+            updates.extend(AccountState::apply_balance_change_with_fee(
+                &passenger,
+                remaining_amount,
+                fee,
+                BalanceEffectKind::RideCancelRefund,
+                None,
+                db,
+            ));
+        } else {
+            updates.push(AccountState::apply_balance_change(
+                &passenger,
+                remaining_amount,
+                BalanceEffectKind::RideCancelRefund,
+                None,
+                db,
+            ));
+            if fee > 0 {
+                updates.push(AccountState::apply_balance_change(
+                    from,
+                    -(fee as i64),
+                    BalanceEffectKind::TxFeePaid,
+                    None,
+                    db,
+                ));
+            }
+        }
+        updates
     }
 
     pub fn construct_ride_cancel_key(tx_hash: &str) -> Vec<u8> {

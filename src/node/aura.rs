@@ -65,6 +65,10 @@ impl Consensus for Aura {
             ))
         }
     }
+
+    fn block_is_in_current_slot(&self, block: &Block) -> bool {
+        self.slot_at_time(block.timestamp) == self.current_slot()
+    }
 }
 
 #[cfg(test)]
@@ -83,6 +87,21 @@ mod tests {
             slot, expected_author
         );
         assert_eq!(aura.current_author(), expected_author);
+    }
+
+    #[test]
+    fn block_is_in_current_slot_distinguishes_now_from_long_ago() {
+        let aura = Aura::new(vec!["0xauthority".to_string()], 60);
+
+        // A block authored right now is in the current slot — this is what stops the 1-second
+        // authoring loop from emitting an empty block on every tick.
+        let now_block = Block::new_block(1, "0".to_string(), vec![]);
+        assert!(aura.block_is_in_current_slot(&now_block));
+
+        // A block from epoch 0 is not, so the next slot is free to carry a fresh heartbeat.
+        let mut old_block = Block::new_block(1, "0".to_string(), vec![]);
+        old_block.timestamp = 0;
+        assert!(!aura.block_is_in_current_slot(&old_block));
     }
 
     #[test]

@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use tracing::error;
 
 use crate::node::account_state::AccountState;
-use crate::node::balance_effect::{BalanceEffectKind, StateUpdate};
+use crate::node::balance_effect::{BalanceEffect, BalanceEffectKind, StateUpdate};
 use crate::node::database::Database;
 
 use super::{
@@ -13,12 +13,14 @@ use super::{
     ride_request::RideRequest,
 };
 
-fn referrer_fee_ceiling(percent: u8, fare: u64) -> u64 {
-    if percent == 0 || fare == 0 {
-        return 0;
-    }
-    // saturating so an absurd fare can't overflow-panic (debug) or wrap (release).
-    ((percent as u64).saturating_mul(fare).saturating_add(99)) / 100
+/// Referrer fee in base units: floor(fare * bps / 10_000). Stored as basis points so
+/// fractional percentages need no config migration (spec §4a). u128 intermediate —
+/// the quotient can exceed u64 for bps > 10_000 (100%); split_fare's .min(fare) cap
+/// contains any overflow, and a later task validates the bps range at boot.
+fn referrer_fee_floor(bps: u16, fare: u64) -> u64 {
+    let result = ((fare as u128 * bps as u128) / 10_000) as u64;
+    debug_assert!(result <= fare || bps > 10_000, "result > fare with valid bps (<=10k)");
+    result
 }
 
 /// Split `fare` into (request-referrer fee, offer-referrer fee, driver remainder),
@@ -30,6 +32,7 @@ fn split_fare(fare: u64, request_fee: u64, offer_fee: u64) -> (u64, u64, u64) {
     let request = request_fee.min(fare);
     let offer = offer_fee.min(fare - request);
     let driver = fare - request - offer;
+    debug_assert_eq!(request + offer + driver, fare, "fee split must sum exactly");
     (request, offer, driver)
 }
 
@@ -112,9 +115,10 @@ impl RidePay {
         &self,
         tx_hash: &String,
         db: &Database,
-        request_fee_percent: u8,
-        offer_fee_percent: u8,
+        request_fee_bps: u16,
+        offer_fee_bps: u16,
         passenger: &String,
+        fee: u64,
     ) -> Vec<StateUpdate> {
         let ride_acceptance_tx_hash = &self.ride_acceptance_transaction_hash;
 
@@ -168,11 +172,11 @@ impl RidePay {
         // Cap referrer fees so request + offer can never exceed the fare being paid; the
         // driver gets the remainder. Prevents the `fare - total_deducted` underflow.
         let request_fee = match &request_referrer {
-            Some(_) => referrer_fee_ceiling(request_fee_percent, self.fare),
+            Some(_) => referrer_fee_floor(request_fee_bps, self.fare),
             None => 0,
         };
         let offer_fee = match &offer_referrer {
-            Some(_) => referrer_fee_ceiling(offer_fee_percent, self.fare),
+            Some(_) => referrer_fee_floor(offer_fee_bps, self.fare),
             None => 0,
         };
         let (request_fee, offer_fee, driver_amount) =
@@ -180,37 +184,72 @@ impl RidePay {
 
         let passenger_cp = Some(passenger.clone());
 
-        if request_fee > 0 {
-            if let Some(ref req_ref) = request_referrer {
-                updates.push(AccountState::apply_balance_change(
-                    &canonical_account_address(req_ref),
-                    request_fee as i64,
-                    BalanceEffectKind::ReferrerRequestFee,
-                    passenger_cp.clone(),
-                    db,
-                ));
-            }
+        // Every balance movement this transaction makes, as (canonical address, delta,
+        // audit reason, counterparty). None of these four accounts is guaranteed distinct:
+        // `referrer` is a free-form Option<String> with no self-referral check, and
+        // RideOffer::verify_state never rejects an offer from the passenger, so the payer
+        // can legitimately be the driver and/or a referrer. Two writes to one balance key
+        // collide in the block's deferred batch (last write wins), so the legs are netted
+        // per address below into exactly one write each.
+        let mut legs: Vec<(String, i64, BalanceEffectKind, Option<String>)> = Vec::new();
+        if let (true, Some(req_ref)) = (request_fee > 0, &request_referrer) {
+            legs.push((
+                canonical_account_address(req_ref),
+                request_fee as i64,
+                BalanceEffectKind::ReferrerRequestFee,
+                passenger_cp.clone(),
+            ));
+        }
+        if let (true, Some(off_ref)) = (offer_fee > 0, &offer_referrer) {
+            legs.push((
+                canonical_account_address(off_ref),
+                offer_fee as i64,
+                BalanceEffectKind::ReferrerOfferFee,
+                passenger_cp.clone(),
+            ));
+        }
+        if driver_amount > 0 {
+            legs.push((
+                canonical_account_address(&driver),
+                driver_amount as i64,
+                BalanceEffectKind::RidePayDriverCredit,
+                passenger_cp,
+            ));
+        }
+        if fee > 0 {
+            legs.push((
+                canonical_account_address(passenger),
+                -(fee as i64),
+                BalanceEffectKind::TxFeePaid,
+                None,
+            ));
         }
 
-        if offer_fee > 0 {
-            if let Some(ref off_ref) = offer_referrer {
-                updates.push(AccountState::apply_balance_change(
-                    &canonical_account_address(off_ref),
-                    offer_fee as i64,
-                    BalanceEffectKind::ReferrerOfferFee,
-                    passenger_cp.clone(),
-                    db,
-                ));
-            }
+        // One storage write per distinct address carrying its net delta, attached to that
+        // address's first leg; every later leg on the same address is effect-only, so the
+        // audit trail keeps one record per reason (see
+        // AccountState::apply_balance_change_with_fee for the same shape). Leg order is
+        // fixed by the pushes above — deterministic, unlike HashMap iteration, which must
+        // never reach consensus bytes.
+        // ponytail: O(n^2) over at most four legs; a map would cost more than it saves.
+        for (i, (address, delta, kind, counterparty)) in legs.iter().enumerate() {
+            let first = !legs[..i].iter().any(|(a, ..)| a == address);
+            let net: i64 = legs
+                .iter()
+                .filter(|(a, ..)| a == address)
+                .map(|(_, d, ..)| d)
+                .sum();
+            updates.push(StateUpdate {
+                storage: (first && net != 0)
+                    .then(|| AccountState::update_account_state_key(address, net, db)),
+                effect: Some(BalanceEffect {
+                    address: address.clone(),
+                    delta: *delta,
+                    kind: kind.clone(),
+                    counterparty: counterparty.clone(),
+                }),
+            });
         }
-
-        updates.push(AccountState::apply_balance_change(
-            &driver,
-            driver_amount as i64,
-            BalanceEffectKind::RidePayDriverCredit,
-            passenger_cp,
-            db,
-        ));
 
         updates
     }
@@ -243,34 +282,46 @@ impl Decodable for RidePay {
 
 #[cfg(test)]
 mod tests {
-    use super::{referrer_fee_ceiling, split_fare};
+    use super::{referrer_fee_floor, split_fare};
+    use proptest::prelude::*;
 
     #[test]
-    fn split_fare_never_exceeds_fare() {
-        // Normal fares: fees fit, driver gets the rest.
-        assert_eq!(split_fare(100, 2, 2), (2, 2, 96));
-        // Ceiling overshoot on tiny fare: 2% of 1 rounds to 1 on each side (sum 2 > 1).
-        // Capped so the total stays 1 and the driver amount never underflows.
-        assert_eq!(split_fare(1, 1, 1), (1, 0, 0));
-        // Misconfigured fees summing to > 100%: still capped at the fare.
-        assert_eq!(split_fare(10, 8, 8), (8, 2, 0));
-        // No referrers: driver gets the whole fare.
-        assert_eq!(split_fare(50, 0, 0), (0, 0, 50));
-        // Invariant across a range: request + offer + driver == fare, no overflow.
-        for fare in [0u64, 1, 2, 3, 100, u64::MAX] {
-            let fee = referrer_fee_ceiling(60, fare);
-            let (r, o, d) = split_fare(fare, fee, fee);
-            assert_eq!(r + o + d, fare, "fare {}", fare);
-            assert!(r + o <= fare);
-        }
+    fn referrer_fee_floor_bps() {
+        assert_eq!(referrer_fee_floor(0, 100), 0);
+        assert_eq!(referrer_fee_floor(200, 0), 0);
+        assert_eq!(referrer_fee_floor(200, 100), 2); // 2% of 100
+        // Floor kills the old ceiling distortion (2% of 3 ceiling-rounded to 33%).
+        assert_eq!(referrer_fee_floor(200, 3), 0);
+        assert_eq!(referrer_fee_floor(200, 49), 0);
+        assert_eq!(referrer_fee_floor(200, 50), 1);
+        assert_eq!(referrer_fee_floor(10_000, u64::MAX), u64::MAX); // 100%, no overflow
+        assert_eq!(referrer_fee_floor(1, 10_000), 1); // 1 bp granularity
     }
 
     #[test]
-    fn referrer_fee_ceiling_saturates() {
-        assert_eq!(referrer_fee_ceiling(0, 100), 0);
-        assert_eq!(referrer_fee_ceiling(2, 0), 0);
-        assert_eq!(referrer_fee_ceiling(2, 100), 2);
-        assert_eq!(referrer_fee_ceiling(2, 1), 1); // ceiling rounds up
-        let _ = referrer_fee_ceiling(100, u64::MAX); // must not overflow-panic
+    fn split_fare_never_exceeds_fare() {
+        assert_eq!(split_fare(100, 2, 2), (2, 2, 96));
+        assert_eq!(split_fare(1, 1, 1), (1, 0, 0));
+        assert_eq!(split_fare(10, 8, 8), (8, 2, 0));
+        assert_eq!(split_fare(50, 0, 0), (0, 0, 50));
+    }
+
+    proptest! {
+        // Spec §4a: request + offer + driver == fare, exactly, for every input.
+        #[test]
+        fn fee_split_sums_exactly(fare in any::<u64>(), rbps in 0u16..=10_000, obps in 0u16..=10_000) {
+            let (r, o, d) = split_fare(
+                fare,
+                referrer_fee_floor(rbps, fare),
+                referrer_fee_floor(obps, fare),
+            );
+            prop_assert!(r <= fare && o <= fare - r);
+            prop_assert_eq!(r + o + d, fare);
+        }
+
+        #[test]
+        fn floor_fee_bounded_by_fare(fare in any::<u64>(), bps in 0u16..=10_000) {
+            prop_assert!(referrer_fee_floor(bps, fare) <= fare);
+        }
     }
 }

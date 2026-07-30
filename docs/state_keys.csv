@@ -10,3 +10,6 @@ ride_acceptance_{},
 ride_acceptance_{}:fare_paid,
 ride_acceptance_{}:cancel,
 ride_pay_{},
+chain_params,ChainInit (JSON)
+total_supply,u64 (JSON)
+processed_ref_{},tx hash (exactly-once Mint/Burn ref marker)

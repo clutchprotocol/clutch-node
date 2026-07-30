@@ -128,24 +128,44 @@ To get started with Clutch-Node, follow these steps:
     cargo run -- --env node1
     ```
 
-## Block Reward
+## Transaction Fees
 
-`clutch-node` supports a fixed author block reward configured per node environment file:
+Block rewards are gone (`block_reward_amount` no longer exists). The block author is paid
+out of transaction fees instead: a flat `tx_fee` per transaction, credited to `block.author`
+once per block as a single aggregate. No CLT is created — fees are backed CLT changing hands.
+
+`Mint` is fee-exempt (the mint authority may hold no balance), as is the genesis `ChainInit`.
+A transaction whose sender is the block author pays no fee to itself.
+
+## Consensus Parameters
+
+These live in `config/node/{env}.toml` and are committed to state by the genesis `ChainInit`
+transaction, so they are part of the genesis hash: **all nodes on a network must carry
+identical values or they cannot peer**. None of them is optional — a config missing any key
+below fails to deserialize at boot.
 
 ```toml
-block_reward_amount = 50
+chain_id = 2077                        # signed into every tx hash; replay-isolates networks
+is_testnet = true                      # false requires faucet_allocation = 0
+tx_fee = 1000                          # flat fee per transaction, paid to the block author
+mint_authority = "0x..."               # the only address allowed to sign Mint
+faucet_address = "0x..."               # genesis-funded account (testnet only)
+faucet_allocation = 1000000000000000   # its balance in base units, <= i64::MAX
+ride_request_referrer_fee_bps = 200    # basis points (200 bps = 2%), floor-rounded
+ride_offer_referrer_fee_bps = 200      # renamed from the old percent-based fields
 ```
-
-- The reward is minted on every accepted non-genesis block.
-- The full reward (`100%`) is credited to the block author account (`block.author`).
-- Genesis block does not mint any author reward.
 
 ## CLT Economics
 
-Ride payments and validator rewards are separate:
+CLT is a redeemable token pegged at **1 USD = 1,000,000 CLT** (six decimals in base units),
+so `total_supply` must always match the off-chain reserve:
 
-- **RidePay** — referrer fees (default 2% request + 2% offer per installment); driver receives the remainder
-- **Blocks** — `block_reward_amount` (default 50 CLT) minted to the block author each non-genesis block
+- **Mint** — the mint authority credits an address against a paid-in reserve deposit. Carries
+  a `credit_ref` (`keccak256` of the treasury intent id) that may be claimed exactly once.
+- **Burn** — permissionless; destroys the sender's CLT. An optional `redemption_ref` marks it
+  as a redemption claim the treasury pays out off-chain, also exactly once.
+- **RidePay** — referrer fees (default 200 bps request + 200 bps offer per installment,
+  floor-rounded and capped so they can never exceed the fare); the driver takes the remainder.
 
 Full details: [docs.clutchprotocol.io/clutch-node/clt-economics](https://docs.clutchprotocol.io/clutch-node/clt-economics)
 
