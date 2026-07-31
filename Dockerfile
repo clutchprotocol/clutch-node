@@ -83,8 +83,18 @@ RUN apt-get update && \
 RUN groupadd -g 999 clutch && \
     useradd -r -u 999 -g clutch -s /bin/sh clutch
 
-# Create directories with proper permissions
-RUN mkdir -p /usr/local/bin /app/config && \
+# Create directories with proper permissions.
+#
+# /app/data exists so chain state can live on a mounted volume. It MUST be created here, owned by
+# clutch, rather than left to the volume mount: Docker copies ownership from the image when it
+# initialises an empty named volume, but a mount path absent from the image is created root-owned,
+# and this container runs as clutch (uid 999) — the node would fail to open RocksDB.
+#
+# Without a volume the DB defaults to the working directory, i.e. the container's writable layer,
+# so `up -d --force-recreate` silently discarded the whole chain on every deploy. Stage was
+# restarting from genesis each time, which for a redeemable token means minted CLT vanishing while
+# the backing USDT stayed at custody.
+RUN mkdir -p /usr/local/bin /app/config /app/data && \
     chown -R clutch:clutch /app
 
 # Copy the optimized binary
