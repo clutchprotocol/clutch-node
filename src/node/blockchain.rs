@@ -1,6 +1,7 @@
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use super::blocks::block::Block;
+use super::metric;
 use super::configuration::AppConfig;
 use super::consensus::Consensus;
 use super::p2p_server::handshake::Handshake;
@@ -78,6 +79,21 @@ impl Blockchain {
             );
         }
 
+        // Publish the stored height immediately.
+        //
+        // LATEST_BLOCK_INDEX is otherwise only set by add_block_to_chain, so it reads 0 from process
+        // start until the next block arrives -- on a node that is synced and idle, indefinitely.
+        // Every dashboard and every probe scraping it saw 0 after a restart and read that as an
+        // empty chain; it is how a node holding 24,000 blocks reported height 0 while its database
+        // sat there at several megabytes.
+        match Block::get_latest_block(&blockchain.db) {
+            Ok(Some(b)) => metric::LATEST_BLOCK_INDEX.set(b.index as i64),
+            // No block yet is genuinely 0. A read FAILURE is not, so it is left alone rather than
+            // published as an empty chain.
+            Ok(None) => metric::LATEST_BLOCK_INDEX.set(0),
+            Err(e) => error!("could not publish the stored block height at startup: {e}"),
+        }
+
         blockchain
     }
 
@@ -127,10 +143,27 @@ impl Blockchain {
     }
 
     pub fn shutdown_blockchain(&mut self) {
-        if self.developer_mode {
-            self.blockchain_write_to_file();
-            self.cleanup_db();
+        if !self.developer_mode {
+            return;
         }
+        self.blockchain_write_to_file();
+
+        // developer_mode DELETES the database. That is fine for a scratch chain in a working
+        // directory and catastrophic for one on a mounted volume, so DB_PATH is treated as the
+        // signal that this data is meant to outlive the process.
+        //
+        // Stage ran with developer_mode = true and per-node volumes for a month. Every deploy
+        // erased the chain of whichever node finished its graceful stop inside the grace period,
+        // while the ones SIGKILLed first survived -- so the loss moved between nodes and was
+        // blamed on the volumes, on resyncing, and on the deploy script in turn. A node that
+        // deletes durable storage because a boolean says so should at least say no.
+        if let Ok(path) = std::env::var("DB_PATH") {
+            warn!(
+                "developer_mode is set but DB_PATH={path} points at durable storage. REFUSING to delete the database. Unset DB_PATH for a throwaway chain, or set developer_mode = false for a real one."
+            );
+            return;
+        }
+        self.cleanup_db();
     }
 
     fn cleanup_db(&mut self) {
