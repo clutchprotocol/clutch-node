@@ -4,6 +4,7 @@ pub mod get_block_bodies;
 pub mod get_block_header;
 pub mod gossipsub_handler;
 pub mod handshake;
+pub mod sync_state;
 pub mod request_response_handler;
 pub mod server;
 pub use behaviour::P2PBehaviour;

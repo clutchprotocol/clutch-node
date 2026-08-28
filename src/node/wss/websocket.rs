@@ -690,5 +690,18 @@ pub fn build_chain_info_response(
         // (a block/sec needs ~285M years to get there), so they stay bare numbers.
         "total_supply": total_supply.to_string(),
         "latest_block_index": latest_block_index,
+        // Whether that index is the tip or just how far this node has got.
+        //
+        // Without these, a syncing node's answer is indistinguishable from a synced one's, and
+        // every consumer silently treats a partial chain as the whole chain. A treasury doing this
+        // judged its reserve against a supply frozen near genesis and submitted mints into a chain
+        // nobody was following.
+        //
+        // `best_peer_block_index` is 0 when no peer has been heard from, which means unknown, not
+        // "the tip is zero" — `is_syncing` is false in that case because a lone node is alone, not
+        // behind.
+        "is_syncing": crate::node::p2p_server::sync_state::is_syncing(latest_block_index),
+        "best_peer_block_index": crate::node::p2p_server::sync_state::best_peer_height(),
+        "blocks_behind": crate::node::p2p_server::sync_state::blocks_behind(latest_block_index),
     })
 }

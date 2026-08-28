@@ -257,6 +257,11 @@ async fn handle_handshake_response(
             let current_block_index = our_handshake.latest_block_index;
             let received_block_index = handshake.latest_block_index;
 
+            // Keep what the peer said. This value was already computed here and then discarded,
+            // which is why a node had no way to report that it was behind: get_chain_info answered
+            // with however far it had got and nothing distinguished that from the tip.
+            crate::node::p2p_server::sync_state::record_peer_height(received_block_index);
+
             if current_block_index < received_block_index {
                 warn!("this node is needed to syncing!");
 
