@@ -87,10 +87,16 @@ impl Blockchain {
         // empty chain; it is how a node holding 24,000 blocks reported height 0 while its database
         // sat there at several megabytes.
         match Block::get_latest_block(&blockchain.db) {
-            Ok(Some(b)) => metric::LATEST_BLOCK_INDEX.set(b.index as i64),
+            // Braced to discard the return: Gauge::set hands back the PREVIOUS value, so bare arms
+            // here are an i64 next to the error arm's unit and will not compile.
+            Ok(Some(b)) => {
+                metric::LATEST_BLOCK_INDEX.set(b.index as i64);
+            }
             // No block yet is genuinely 0. A read FAILURE is not, so it is left alone rather than
             // published as an empty chain.
-            Ok(None) => metric::LATEST_BLOCK_INDEX.set(0),
+            Ok(None) => {
+                metric::LATEST_BLOCK_INDEX.set(0);
+            }
             Err(e) => error!("could not publish the stored block height at startup: {e}"),
         }
 
