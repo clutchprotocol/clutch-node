@@ -1,0 +1,59 @@
+# Run the test suite on every push and PR.
+#
+# CLAUDE.md said it outright: "There is no CI job running `cargo test` — run tests locally before
+# pushing." That is a fine instruction and a bad guarantee. It meant the only thing standing between
+# a broken suite and `main` was whoever remembered, and on Windows hosts it could not be honoured at
+# all without an MSVC toolchain — the image build compiles the crate but never runs a test, so a
+# green build said nothing about correctness.
+#
+# rocksdb needs clang and libclang to build its bindings; the runner image has neither by default.
+
+name: Test
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'src/**'
+      - 'tests/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/test.yml'
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install rocksdb build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang libclang-dev pkg-config libssl-dev
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # DB-touching tests open real RocksDB instances in the working directory and are marked
+      # #[serial], but serial_test only orders the ones carrying the attribute. --test-threads=1
+      # is the belt to that braces: a new test that opens a database without #[serial] fails here
+      # rather than intermittently, which is the failure mode nobody ever reproduces.
+      - name: cargo test
+        run: cargo test -- --test-threads=1
+
+      # Stray clutch-node-*.db directories and output/*.json are test leftovers. Failing on them
+      # keeps a test that forgets its cleanup from being noticed only when someone commits one.
+      - name: No test artifacts left behind
+        run: |
+          leftovers=$(ls -d clutch-node-*.db output 2>/dev/null || true)
+          if [ -n "$leftovers" ]; then
+            echo "test run left artifacts behind:"
+            echo "$leftovers"
+            echo "clean up via blockchain.shutdown_blockchain() — note it no longer deletes when DB_PATH is set"
+            exit 1
+          fi
