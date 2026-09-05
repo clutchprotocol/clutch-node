@@ -48,7 +48,7 @@ fn transfer(from: &str, sk: &str, nonce: u64, to: &str, value: u64) -> Transacti
 /// them sharing one.
 #[test]
 fn a_block_never_carries_more_transactions_than_the_cap() {
-    let chain = Blockchain::new(
+    let mut chain = Blockchain::new(
         "clutch-node-tx-cap-test".to_string(),
         SECOND_PK.to_string(),
         SECOND_SK.to_string(),
@@ -93,7 +93,7 @@ fn a_block_never_carries_more_transactions_than_the_cap() {
 /// so both senders belong in the same block.
 #[test]
 fn without_a_cap_both_senders_share_one_block() {
-    let chain = Blockchain::new(
+    let mut chain = Blockchain::new(
         "clutch-node-tx-cap-uncapped-test".to_string(),
         SECOND_PK.to_string(),
         SECOND_SK.to_string(),
