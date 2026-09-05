@@ -3,6 +3,19 @@ use dotenv::dotenv;
 use serde::Deserialize;
 use tracing::info;
 
+/// 1,000 transactions per authored block.
+///
+/// A bound, not a tuned throughput figure. Nothing limited block size before this, so a pool that
+/// filled faster than it drained produced one ever-larger block, and the flat `tx_fee` was the
+/// only thing making that cost anything. Well above any volume this chain has seen, and low
+/// enough that one block stays a sane size to serialise and gossip.
+///
+/// NOT a consensus value, so nodes may disagree on it without forking — see
+/// `Blockchain::with_max_block_transactions`. It is absent from `ChainInit` on purpose.
+fn default_max_block_transactions() -> usize {
+    1_000
+}
+
 #[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
     pub log_level: String,
@@ -16,6 +29,11 @@ pub struct AppConfig {
     pub listen_addrs: Vec<String>,
     pub bootstrap_nodes: Vec<String>,
     pub block_authoring_enabled: bool,
+    /// How many transactions this node puts in a block it authors. Local policy, not consensus:
+    /// it does not belong in `ChainInit` and does not have to match across nodes. Defaulted so an
+    /// existing deployment picks up the bound without a config edit.
+    #[serde(default = "default_max_block_transactions")]
+    pub max_block_transactions: usize,
     pub chain_id: u64,
     pub is_testnet: bool,
     pub tx_fee: u64,

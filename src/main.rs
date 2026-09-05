@@ -59,4 +59,5 @@ fn initialize_blockchain(config: &AppConfig) -> Blockchain {
         config.authorities.clone(),
         chain_init,
     )
+    .with_max_block_transactions(config.max_block_transactions)
 }
