@@ -301,10 +301,22 @@ impl Blockchain {
 
         let index = latest_block.index + 1;
         let previous_hash = latest_block.hash.clone();
-        let transactions = match TransactionPool::get_transactions(&self.db) {
+        let mut transactions = match TransactionPool::get_transactions(&self.db) {
             Ok(transactions) => Self::drop_intra_block_conflicts(&self.db, transactions),
             Err(e) => return Err(format!("Failed to get transactions from pool: {}", e)),
         };
+
+        // Applied AFTER conflict-dropping, so the cap counts transactions that would actually
+        // have been included rather than candidates most of which were about to be discarded.
+        //
+        // The remainder is not dropped: nothing removes a transaction from the pool until a block
+        // carrying it is imported, so whatever the cap defers is still there for the next block —
+        // and this loop ticks every second while a slot lasts `step_duration` seconds, which is
+        // how a busy pool drains across several blocks in one slot.
+        //
+        // `drop_intra_block_conflicts` has already sorted by nonce, so truncation keeps the
+        // oldest work and defers the newest, rather than picking arbitrarily.
+        transactions.truncate(self.max_block_transactions);
 
         // Empty blocks are legal and necessary — confirmation depth is counted in blocks, so a
         // chain that stops producing them when idle can never confirm what is already on it (see
