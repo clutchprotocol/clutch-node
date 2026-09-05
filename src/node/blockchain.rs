@@ -26,6 +26,7 @@ pub struct Blockchain {
     author_public_key: String,
     author_secret_key: String,
     chain_init: ChainInit,
+    max_block_transactions: usize,
 }
 
 impl Blockchain {
@@ -64,6 +65,8 @@ impl Blockchain {
             author_public_key,
             author_secret_key,
             chain_init,
+            // Uncapped by default, so a caller that never sets one behaves exactly as before.
+            max_block_transactions: usize::MAX,
         };
 
         Block::genesis_import_block(&blockchain.db, &blockchain.chain_init);
@@ -270,6 +273,26 @@ impl Blockchain {
         RideAcceptance::list_recent_trips(&self.db, driver_address, passenger_address)
     }
 
+    /// Cap on how many transactions this node puts in a block **it authors**.
+    ///
+    /// Authoring only, and deliberately so. `Block::validate_block` checks the signature, the
+    /// index and the previous hash — not the transaction count — so a peer accepts whatever size
+    /// block it is handed. That makes this local policy rather than a consensus rule: two nodes
+    /// can disagree about it and still agree on the chain. Turning it into a consensus rule means
+    /// putting it in `ChainInit`, and that is a genesis change, which forks the chain and costs a
+    /// reset.
+    ///
+    /// The ceiling, stated plainly: this bounds the blocks this node PRODUCES, not the ones it
+    /// ACCEPTS. A malicious or broken author can still emit an arbitrarily large block and every
+    /// node will import it. That is a reasonable trade while the authority set is three nodes the
+    /// operator runs. It stops being reasonable the moment that set opens to anyone else, and the
+    /// fix at that point is the consensus rule and the reset it costs.
+    pub fn with_max_block_transactions(mut self, max: usize) -> Self {
+        assert!(max > 0, "max_block_transactions must be at least 1");
+        self.max_block_transactions = max;
+        self
+    }
+
     pub fn author_new_block(&self) -> Result<Block, String> {
         let latest_block = match self.get_latest_block()? {
             Some(block) => block,
@@ -278,10 +301,22 @@ impl Blockchain {
 
         let index = latest_block.index + 1;
         let previous_hash = latest_block.hash.clone();
-        let transactions = match TransactionPool::get_transactions(&self.db) {
+        let mut transactions = match TransactionPool::get_transactions(&self.db) {
             Ok(transactions) => Self::drop_intra_block_conflicts(&self.db, transactions),
             Err(e) => return Err(format!("Failed to get transactions from pool: {}", e)),
         };
+
+        // Applied AFTER conflict-dropping, so the cap counts transactions that would actually
+        // have been included rather than candidates most of which were about to be discarded.
+        //
+        // The remainder is not dropped: nothing removes a transaction from the pool until a block
+        // carrying it is imported, so whatever the cap defers is still there for the next block —
+        // and this loop ticks every second while a slot lasts `step_duration` seconds, which is
+        // how a busy pool drains across several blocks in one slot.
+        //
+        // `drop_intra_block_conflicts` has already sorted by nonce, so truncation keeps the
+        // oldest work and defers the newest, rather than picking arbitrarily.
+        transactions.truncate(self.max_block_transactions);
 
         // Empty blocks are legal and necessary — confirmation depth is counted in blocks, so a
         // chain that stops producing them when idle can never confirm what is already on it (see
