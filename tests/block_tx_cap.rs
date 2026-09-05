@@ -17,7 +17,12 @@ const FAUCET_PK: &str = "0xdeb4cfb63db134698e1879ea24904df074726cc0";
 const FAUCET_SK: &str = "d2c446110cfcecbdf05b2be528e72483de5b6f7ef9c7856df2f81f48e9f2748f";
 const SECOND_PK: &str = "0x9b6e8afff8329743cac73dbef83ca3cbf9a74c20";
 const SECOND_SK: &str = "0883ddd3d07303b87c954b0c9383f7b78f45e002520fc03a8adc80595dbf6509";
-const SINK: &str = "0x8f19077627cde4848b090c53c83b12956837d5e9";
+// TWO sinks, not one. `written_accounts` counts a Transfer's recipient as written, and
+// `drop_intra_block_conflicts` drops a second transaction touching an account already claimed in
+// the block — so two transfers to the SAME address never share a block whatever the cap says, and
+// a test using one sink measures that rule rather than this one.
+const SINK_A: &str = "0x8f19077627cde4848b090c53c83b12956837d5e9";
+const SINK_B: &str = "0x0912514c7cc3eec2b2dab4e1d150c4b5eaee5a6f";
 
 fn ci() -> ChainInit {
     ChainInit {
@@ -65,10 +70,10 @@ fn a_block_never_carries_more_transactions_than_the_cap() {
     chain.author_new_block().expect("funding block");
 
     chain
-        .add_transaction_to_pool(&transfer(FAUCET_PK, FAUCET_SK, 2, SINK, 1_000))
+        .add_transaction_to_pool(&transfer(FAUCET_PK, FAUCET_SK, 2, SINK_A, 1_000))
         .expect("faucet tx rejected");
     chain
-        .add_transaction_to_pool(&transfer(SECOND_PK, SECOND_SK, 1, SINK, 1_000))
+        .add_transaction_to_pool(&transfer(SECOND_PK, SECOND_SK, 1, SINK_B, 1_000))
         .expect("second-sender tx rejected");
 
     let block = chain.author_new_block().expect("capped block");
@@ -108,10 +113,10 @@ fn without_a_cap_both_senders_share_one_block() {
     chain.author_new_block().expect("funding block");
 
     chain
-        .add_transaction_to_pool(&transfer(FAUCET_PK, FAUCET_SK, 2, SINK, 1_000))
+        .add_transaction_to_pool(&transfer(FAUCET_PK, FAUCET_SK, 2, SINK_A, 1_000))
         .expect("faucet tx rejected");
     chain
-        .add_transaction_to_pool(&transfer(SECOND_PK, SECOND_SK, 1, SINK, 1_000))
+        .add_transaction_to_pool(&transfer(SECOND_PK, SECOND_SK, 1, SINK_B, 1_000))
         .expect("second-sender tx rejected");
 
     let block = chain.author_new_block().expect("uncapped block");
