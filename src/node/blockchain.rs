@@ -29,6 +29,47 @@ pub struct Blockchain {
     max_block_transactions: usize,
 }
 
+/// Check an authority set against the arithmetic Aura builds on it.
+///
+/// Two of these are latent panics rather than misconfigurations, because both the slot duration
+/// (`60 / len`) and the slot-to-author mapping (`authorities[slot % len]`) divide by that length:
+///
+/// - **Empty**: `60 / 0` panics while constructing the chain, with a divide-by-zero and no hint
+///   about which value was wrong.
+/// - **More than 60**: the slot duration truncates to `0`, the node starts and peers fine, and
+///   then `slot_at_time` divides by zero the first time it computes a slot. A panic after a
+///   successful boot is much worse to diagnose than one during it.
+/// - **Duplicates**: not a panic. The repeated authority quietly takes two slots per round, which
+///   reads as bad luck in block distribution rather than as a typo in a config file.
+///
+/// This is a hard ceiling on validator-set size that nothing else states, so it matters when the
+/// set grows beyond the three of the current testnet.
+fn validate_authorities(authorities: &[String]) -> Result<(), String> {
+    if authorities.is_empty() {
+        return Err("the authority set is empty; there would be no slot to author in".to_string());
+    }
+    // 60 is the numerator of the step-duration division, so past it the duration truncates to zero.
+    if authorities.len() > 60 {
+        return Err(format!(
+            "{} authorities exceeds the maximum of 60: step duration is `60 / len` seconds, which              truncates to 0 above that and makes every slot calculation divide by zero",
+            authorities.len()
+        ));
+    }
+    let mut seen = std::collections::HashSet::with_capacity(authorities.len());
+    for a in authorities {
+        let key = a.trim().to_lowercase();
+        if key.is_empty() {
+            return Err("an authority entry is empty".to_string());
+        }
+        if !seen.insert(key) {
+            return Err(format!(
+                "authority {a} appears more than once; it would take two slots per round"
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl Blockchain {
     pub fn new(
         name: String,
@@ -54,6 +95,9 @@ impl Blockchain {
             chain_init.is_testnet || chain_init.faucet_allocation == 0,
             "non-testnet chain must have zero faucet_allocation (a surviving faucet pre-mint destroys the peg)"
         );
+
+        // The authority set has to survive the arithmetic built on it before anything else runs.
+        validate_authorities(&authorities).unwrap_or_else(|e| panic!("invalid authority set: {e}"));
 
         let db = Database::new_db(&name);
         let step_duration = 60 / authorities.len() as u64;
@@ -413,6 +457,39 @@ impl Blockchain {
 
 #[cfg(test)]
 mod tests {
+    /// The two cases here are latent panics, not preferences: both the slot duration and the
+    /// slot-to-author mapping divide by the authority count.
+    #[test]
+    fn authority_set_edges_are_refused_before_the_arithmetic_panics() {
+        let a = |n: usize| -> Vec<String> { (0..n).map(|i| format!("0x{i:040x}")).collect() };
+
+        assert!(super::validate_authorities(&a(1)).is_ok(), "one authority is legal");
+        assert!(super::validate_authorities(&a(3)).is_ok(), "the current testnet set is legal");
+        assert!(super::validate_authorities(&a(60)).is_ok(), "60 is the last legal size");
+
+        // `60 / 0` — panics while constructing the chain.
+        let empty = super::validate_authorities(&[]).expect_err("empty must be refused");
+        assert!(empty.contains("empty"), "got: {empty}");
+
+        // step_duration truncates to 0, then every slot calculation divides by zero AFTER boot.
+        let too_many = super::validate_authorities(&a(61)).expect_err("61 must be refused");
+        assert!(too_many.contains("60"), "the message must name the ceiling, got: {too_many}");
+    }
+
+    #[test]
+    fn a_repeated_authority_is_refused() {
+        let dup = vec![
+            "0xAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_string(),
+            // Same authority, different case — it would still take two slots per round.
+            "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+        ];
+        let err = super::validate_authorities(&dup).expect_err("a duplicate must be refused");
+        assert!(err.contains("more than once"), "got: {err}");
+
+        let blank = vec!["0xaaa".to_string(), "   ".to_string()];
+        assert!(super::validate_authorities(&blank).is_err(), "a blank entry must be refused");
+    }
+
     use super::*;
     use crate::node::transactions::function_call::FunctionCall;
     use crate::node::transactions::transfer::Transfer;
