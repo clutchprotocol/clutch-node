@@ -36,6 +36,7 @@ fn ci() -> ChainInit {
         faucet_allocation: 1_000_000_000_000_000,
         mint_cosigners: Vec::new(),
         mint_threshold: 0,
+        ride_auto_release_secs: 0,
     }
 }
 
@@ -125,7 +126,7 @@ fn ride_pay_emits_referrer_request_fee_effect() {
             // No fee flows through this test — it drives per-type state_transaction directly
             // and asserts only the downstream RidePay referrer effect, not the passenger's
             // post-acceptance balance.
-            ride_acceptance.state_transaction(&PASSENGER.to_string(), &ride_acceptance_hash, &db, 0),
+            ride_acceptance.state_transaction(&PASSENGER.to_string(), &ride_acceptance_hash, &db, 0, 0),
         );
     }
 

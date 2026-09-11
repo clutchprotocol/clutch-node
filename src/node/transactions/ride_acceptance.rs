@@ -135,6 +135,7 @@ impl RideAcceptance {
         tx_hash: &String,
         db: &Database,
         fee: u64,
+        block_timestamp: u64,
     ) -> Vec<StateUpdate> {
         let ride_acceptance_tx_hash = &tx_hash;
         let ride_offer_tx_hash = &self.ride_offer_transaction_hash;
@@ -147,6 +148,12 @@ impl RideAcceptance {
         let ride_acceptance_value = serde_json::to_string(&self)
             .unwrap()
             .into_bytes();
+
+        // When the auto-release window starts. Written unconditionally, even on a chain with the
+        // rule disabled, because a chain that enables it later must not find trips it cannot date
+        // — and a missing value is read as "no deadline", which would silently exempt them.
+        let accepted_at_key = Self::construct_ride_acceptance_accepted_at_key(&ride_acceptance_tx_hash);
+        let accepted_at_value = block_timestamp.to_string().into_bytes();
 
         let ride_request_acceptance_key =
             RideRequest::construct_ride_request_acceptance_key(&ride_request_tx_hash);
@@ -175,6 +182,7 @@ impl RideAcceptance {
         );
 
         let mut updates = vec![
+            StateUpdate::storage_only(accepted_at_key, accepted_at_value),
             StateUpdate::storage_only(ride_acceptance_key, ride_acceptance_value),
             StateUpdate::storage_only(ride_request_acceptance_key, ride_request_acceptance_value),
             StateUpdate::storage_only(ride_offer_acceptance_key, ride_offer_acceptance_value),
@@ -243,6 +251,62 @@ impl RideAcceptance {
     pub fn construct_ride_acceptance_key(ride_acceptance_tx_hash: &str) -> Vec<u8> {
         let h = normalize_transaction_hash(ride_acceptance_tx_hash);
         format!("ride_acceptance_{}", h).into_bytes()
+    }
+
+    /// Block timestamp of the acceptance: the instant the auto-release window starts.
+    pub fn construct_ride_acceptance_accepted_at_key(ride_acceptance_tx_hash: &str) -> Vec<u8> {
+        let h = normalize_transaction_hash(ride_acceptance_tx_hash);
+        format!("ride_acceptance_{}:accepted_at", h).into_bytes()
+    }
+
+    /// `None` for an acceptance recorded before this was written, which is read as "never expires"
+    /// by every caller. That is the safe direction: an undated trip keeps today's behaviour rather
+    /// than becoming immediately releasable to the driver.
+    pub fn get_accepted_at(
+        ride_acceptance_tx_hash: &str,
+        db: &Database,
+    ) -> Option<u64> {
+        let key = Self::construct_ride_acceptance_accepted_at_key(ride_acceptance_tx_hash);
+        match db.get("state", &key) {
+            Ok(Some(v)) => String::from_utf8(v).ok().and_then(|s| s.trim().parse::<u64>().ok()),
+            _ => None,
+        }
+    }
+
+    /// Has the held fare stopped being the rider's to reclaim?
+    ///
+    /// False whenever anything is unknown: the rule disabled, the acceptance undated, or the clock
+    /// not yet past the window. Every uncertain case therefore favours the rider, which is the
+    /// direction that cannot take money from someone by accident.
+    pub fn auto_release_elapsed(
+        ride_acceptance_tx_hash: &str,
+        db: &Database,
+        window_secs: u64,
+        block_timestamp: u64,
+    ) -> bool {
+        Self::auto_release_elapsed_at(
+            Self::get_accepted_at(ride_acceptance_tx_hash, db),
+            window_secs,
+            block_timestamp,
+        )
+    }
+
+    /// The rule itself, with the database read already done, so it can be tested directly. It
+    /// decides who receives money, which is not a thing to leave only reachable through a chain
+    /// fixture.
+    pub fn auto_release_elapsed_at(
+        accepted_at: Option<u64>,
+        window_secs: u64,
+        block_timestamp: u64,
+    ) -> bool {
+        if window_secs == 0 {
+            return false;
+        }
+        match accepted_at {
+            // saturating_add so an absurd window cannot wrap into the past and release instantly.
+            Some(accepted_at) => block_timestamp >= accepted_at.saturating_add(window_secs),
+            None => false,
+        }
     }
 
     pub fn construct_ride_acceptance_fare_paid_key(ride_acceptance_tx_hash: &str) -> Vec<u8> {
@@ -560,5 +624,52 @@ impl Decodable for RideAcceptance {
         Ok(RideAcceptance {
             ride_offer_transaction_hash: rlp.val_at(0)?,
         })
+    }
+}
+
+#[cfg(test)]
+mod auto_release_tests {
+    use super::RideAcceptance;
+
+    const WINDOW: u64 = 7_200; // two hours
+    const ACCEPTED: u64 = 1_000_000;
+
+    fn elapsed(accepted_at: Option<u64>, window: u64, now: u64) -> bool {
+        RideAcceptance::auto_release_elapsed_at(accepted_at, window, now)
+    }
+
+    #[test]
+    fn the_window_has_to_actually_pass() {
+        assert!(!elapsed(Some(ACCEPTED), WINDOW, ACCEPTED), "at acceptance");
+        assert!(!elapsed(Some(ACCEPTED), WINDOW, ACCEPTED + WINDOW - 1), "one second short");
+        assert!(elapsed(Some(ACCEPTED), WINDOW, ACCEPTED + WINDOW), "exactly at the deadline");
+        assert!(elapsed(Some(ACCEPTED), WINDOW, ACCEPTED + WINDOW + 1), "past it");
+    }
+
+    /// Disabled means disabled, however long ago the trip was accepted. This is what keeps every
+    /// chain that predates the rule behaving exactly as before.
+    #[test]
+    fn a_zero_window_never_elapses() {
+        assert!(!elapsed(Some(ACCEPTED), 0, ACCEPTED + 10_000_000));
+    }
+
+    /// An acceptance recorded before timestamps were written has no deadline. The alternative --
+    /// treating unknown as expired -- would hand every historical trip's held fare to the driver
+    /// the moment the rule was switched on.
+    #[test]
+    fn an_undated_acceptance_never_elapses() {
+        assert!(!elapsed(None, WINDOW, u64::MAX));
+    }
+
+    /// A window near u64::MAX must not wrap past the current time and release immediately.
+    ///
+    /// Checked at a realistic "now" rather than at u64::MAX: saturating_add pins the deadline AT
+    /// u64::MAX, so asking whether u64::MAX has been reached is true and says nothing. Wrapping
+    /// arithmetic would put the deadline in the past and make this pass instantly, which is the
+    /// bug being excluded.
+    #[test]
+    fn an_absurd_window_saturates_rather_than_wrapping() {
+        assert!(!elapsed(Some(ACCEPTED), u64::MAX, ACCEPTED + 1_000_000));
+        assert!(!elapsed(Some(ACCEPTED), u64::MAX - 1, u64::MAX - 2));
     }
 }

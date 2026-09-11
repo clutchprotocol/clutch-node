@@ -290,6 +290,7 @@ mod mofn_tests {
             faucet_allocation: 0,
             mint_cosigners: cosigners,
             mint_threshold: threshold,
+            ride_auto_release_secs: 0,
         }
     }
 
