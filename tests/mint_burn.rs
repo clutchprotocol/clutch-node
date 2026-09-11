@@ -29,6 +29,8 @@ fn ci() -> ChainInit {
         mint_authority: AUTHOR_PK.to_string(),
         faucet_address: FAUCET_PK.to_string(),
         faucet_allocation: 1_000_000_000_000_000,
+        mint_cosigners: Vec::new(),
+        mint_threshold: 0,
     }
 }
 
@@ -67,6 +69,7 @@ fn signed_mint(sk: &str, from: &str, nonce: u64, to: &str, amount: u64, credit_r
             to: to.to_string(),
             amount,
             credit_ref: credit_ref.to_string(),
+            cosignatures: Vec::new(),
         }),
     );
     tx.sign(sk);

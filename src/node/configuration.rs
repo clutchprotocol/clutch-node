@@ -40,6 +40,13 @@ pub struct AppConfig {
     pub mint_authority: String,
     pub faucet_address: String,
     pub faucet_allocation: u64,
+    /// Further addresses allowed to sign a Mint, beyond mint_authority. Genesis-committed, so it
+    /// must be byte-identical on every node of a chain. Empty is single-signer.
+    #[serde(default)]
+    pub mint_cosigners: Vec<String>,
+    /// Signatures a Mint requires. 0 and 1 both mean single-signer. Genesis-committed.
+    #[serde(default)]
+    pub mint_threshold: u8,
     pub ride_request_referrer_fee_bps: u16,
     pub ride_offer_referrer_fee_bps: u16,
     pub sync_enabled: bool,

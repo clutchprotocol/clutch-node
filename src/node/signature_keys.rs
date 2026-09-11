@@ -73,13 +73,14 @@ impl SignatureKeys {
         (r, s, v)
     }
 
-    pub fn verify(
-        derive_address: &str,
-        data: &[u8],
-        r: &str,
-        s: &str,
-        v: i32,
-    ) -> Result<bool, String> {
+    /// Recover the signing address from a signature over `data`.
+    ///
+    /// `verify` answers "was it this one address", which is the wrong question when a signature
+    /// may legitimately come from any member of a set — the M-of-N mint authority, where looping
+    /// `verify` over the set would be N recoveries to learn what one recovery already knows.
+    /// Returns the address in `0x`-prefixed lowercase hex; run it through
+    /// `canonical_account_address` before comparing against a configured value.
+    pub fn recover_address(data: &[u8], r: &str, s: &str, v: i32) -> Result<String, String> {
         let secp = Secp256k1::new();
         let mut hasher = Keccak256::new();
         hasher.update(data);
@@ -87,21 +88,32 @@ impl SignatureKeys {
         let message = Message::from_digest_slice(&message_hash)
             .map_err(|_| "Message could not be created from hash".to_string())?;
 
-        let sig_r = Vec::from_hex(Self::strip_hex_prefix(r)).map_err(|_| "Invalid hex in r".to_string())?;
-        let sig_s = Vec::from_hex(Self::strip_hex_prefix(s)).map_err(|_| "Invalid hex in s".to_string())?;
+        let sig_r =
+            Vec::from_hex(Self::strip_hex_prefix(r)).map_err(|_| "Invalid hex in r".to_string())?;
+        let sig_s =
+            Vec::from_hex(Self::strip_hex_prefix(s)).map_err(|_| "Invalid hex in s".to_string())?;
+        if sig_r.len() != 32 || sig_s.len() != 32 {
+            return Err("r and s must each be 32 bytes".to_string());
+        }
         let signature_data = [&sig_r[..], &sig_s[..]].concat();
         let recovery_id =
             RecoveryId::from_i32(v - 27).map_err(|_| "Invalid recovery ID".to_string())?;
         let recoverable_sig = RecoverableSignature::from_compact(&signature_data, recovery_id)
             .map_err(|_| "Valid signature could not be created".to_string())?;
 
-        match secp.recover_ecdsa(&message, &recoverable_sig) {
-            Ok(recovered_public_key) => {
-                let derived_address = Self::derive_address(&recovered_public_key);
-                Ok(derived_address == derive_address)
-            }
-            Err(_) => Err("Public key could not be recovered".to_string()),
-        }
+        secp.recover_ecdsa(&message, &recoverable_sig)
+            .map(|pk| Self::derive_address(&pk))
+            .map_err(|_| "Public key could not be recovered".to_string())
+    }
+
+    pub fn verify(
+        derive_address: &str,
+        data: &[u8],
+        r: &str,
+        s: &str,
+        v: i32,
+    ) -> Result<bool, String> {
+        Self::recover_address(data, r, s, v).map(|recovered| recovered == derive_address)
     }
 }
 

@@ -12,6 +12,7 @@ use crate::node::balance_effect::{get_account_balance_effects, load_block_effect
 use crate::node::database::Database;
 use crate::node::file_utils::write_to_file;
 use crate::node::node_services::NodeServices;
+use crate::node::transactions::address::is_valid_address;
 use crate::node::transactions::chain_init::ChainInit;
 use crate::node::transactions::ride_acceptance::{AvailableActiveTrip, AvailableRecentTrip, RideAcceptance};
 use crate::node::transactions::ride_offer::{AvailableRideOffer, RideOffer};
@@ -44,6 +45,48 @@ pub struct Blockchain {
 ///
 /// This is a hard ceiling on validator-set size that nothing else states, so it matters when the
 /// set grows beyond the three of the current testnet.
+/// Check the mint authority set against the threshold configured with it.
+///
+/// A threshold nothing can satisfy is the dangerous direction: minting would be permanently
+/// impossible, and because `mint_threshold` is genesis-committed the only fix is a new chain.
+/// Catching it at boot costs a restart; catching it after launch costs the chain.
+///
+/// Only the multi-signature fields are validated. `mint_authority` itself is deliberately left
+/// alone, because this runs on every boot of an already-running chain and a new check on an
+/// existing value could refuse to start a node that has been fine for months.
+fn validate_mint_authority_set(chain_init: &ChainInit) -> Result<(), String> {
+    if !chain_init.uses_multisig_mint() {
+        if !chain_init.mint_cosigners.is_empty() {
+            return Err(format!(
+                "{} mint cosigner(s) configured with mint_threshold {}; the cosigners would never \
+                 be consulted, which reads as multi-signature minting while being single-signer",
+                chain_init.mint_cosigners.len(),
+                chain_init.mint_threshold
+            ));
+        }
+        return Ok(());
+    }
+
+    for c in &chain_init.mint_cosigners {
+        if !is_valid_address(c) {
+            return Err(format!(
+                "mint cosigner {c:?} is not a 20-byte hex address; no signature could ever \
+                 recover to it, so it would silently never count toward the threshold"
+            ));
+        }
+    }
+
+    let set_size = chain_init.mint_authority_set().len();
+    let threshold = chain_init.effective_mint_threshold();
+    if threshold > set_size {
+        return Err(format!(
+            "mint_threshold {threshold} exceeds the {set_size} distinct authorities available; \
+             no Mint could ever be authorised and the field is genesis-committed"
+        ));
+    }
+    Ok(())
+}
+
 fn validate_authorities(authorities: &[String]) -> Result<(), String> {
     if authorities.is_empty() {
         return Err("the authority set is empty; there would be no slot to author in".to_string());
@@ -98,6 +141,8 @@ impl Blockchain {
 
         // The authority set has to survive the arithmetic built on it before anything else runs.
         validate_authorities(&authorities).unwrap_or_else(|e| panic!("invalid authority set: {e}"));
+        validate_mint_authority_set(&chain_init)
+            .unwrap_or_else(|e| panic!("invalid mint authority set: {e}"));
 
         let db = Database::new_db(&name);
         let step_duration = 60 / authorities.len() as u64;
@@ -606,5 +651,72 @@ mod tests {
         drop_scratch(db, name);
         assert_eq!(kept.len(), 1, "only one writer of 0xA may land");
         assert_eq!(kept[0].from, "0xA", "lowest nonce wins, deterministically");
+    }
+}
+
+#[cfg(test)]
+mod mint_authority_set_tests {
+    use super::validate_mint_authority_set;
+    use crate::node::transactions::chain_init::ChainInit;
+
+    const A: &str = "0x00000000000000000000000000000000000000aa";
+    const B: &str = "0x00000000000000000000000000000000000000bb";
+    const C: &str = "0x00000000000000000000000000000000000000cc";
+
+    fn params(cosigners: Vec<String>, threshold: u8) -> ChainInit {
+        ChainInit {
+            chain_id: 2077,
+            is_testnet: true,
+            tx_fee: 1000,
+            ride_request_referrer_fee_bps: 200,
+            ride_offer_referrer_fee_bps: 200,
+            mint_authority: A.to_string(),
+            faucet_address: "0x0000000000000000000000000000000000000000".to_string(),
+            faucet_allocation: 0,
+            mint_cosigners: cosigners,
+            mint_threshold: threshold,
+        }
+    }
+
+    #[test]
+    fn a_single_signer_chain_is_valid() {
+        assert!(validate_mint_authority_set(&params(vec![], 0)).is_ok());
+        assert!(validate_mint_authority_set(&params(vec![], 1)).is_ok());
+    }
+
+    #[test]
+    fn a_two_of_three_is_valid() {
+        assert!(validate_mint_authority_set(&params(vec![B.to_string(), C.to_string()], 2)).is_ok());
+        assert!(validate_mint_authority_set(&params(vec![B.to_string(), C.to_string()], 3)).is_ok());
+    }
+
+    /// The dangerous direction. mint_threshold is genesis-committed, so a threshold nothing can
+    /// satisfy means minting is impossible for the life of the chain.
+    #[test]
+    fn a_threshold_above_the_set_size_is_refused() {
+        let err = validate_mint_authority_set(&params(vec![B.to_string()], 3)).unwrap_err();
+        assert!(err.contains("exceeds the 2 distinct authorities"), "{err}");
+    }
+
+    #[test]
+    fn cosigners_that_would_never_be_consulted_are_refused() {
+        let err = validate_mint_authority_set(&params(vec![B.to_string()], 1)).unwrap_err();
+        assert!(err.contains("never be consulted"), "{err}");
+    }
+
+    /// No signature can ever recover to a malformed address, so it would silently never count
+    /// toward the threshold — a 2-of-3 that is really a 2-of-2.
+    #[test]
+    fn a_malformed_cosigner_address_is_refused() {
+        let err = validate_mint_authority_set(&params(vec!["not-an-address".to_string()], 2))
+            .unwrap_err();
+        assert!(err.contains("not a 20-byte hex address"), "{err}");
+    }
+
+    #[test]
+    fn duplicate_cosigners_shrink_the_set_and_can_fail_the_threshold() {
+        // A and B, with B listed twice: two distinct authorities, so a 3-of-N is impossible.
+        let p = params(vec![B.to_string(), B.to_uppercase()], 3);
+        assert!(validate_mint_authority_set(&p).is_err());
     }
 }
