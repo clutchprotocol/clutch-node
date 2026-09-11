@@ -5,6 +5,8 @@ use crate::node::account_state::AccountState;
 use crate::node::balance_effect::{BalanceEffectKind, StateUpdate};
 use crate::node::database::Database;
 
+use super::address::canonical_account_address;
+
 pub const CHAIN_PARAMS_KEY: &[u8] = b"chain_params";
 pub const TOTAL_SUPPLY_KEY: &[u8] = b"total_supply";
 
@@ -23,6 +25,18 @@ pub struct ChainInit {
     pub mint_authority: String,
     pub faucet_address: String,
     pub faucet_allocation: u64,
+    /// Further addresses authorised to sign a `Mint`, on top of `mint_authority`. The full
+    /// authority set is `{mint_authority}` plus these. Empty is today's single-signer chain.
+    #[serde(default)]
+    pub mint_cosigners: Vec<String>,
+    /// Signatures a `Mint` requires. `0` and `1` both mean single-signer.
+    ///
+    /// Above 1, a Mint must be submitted by one member of the authority set and carry
+    /// `mint_threshold - 1` further approval signatures from distinct other members — so a
+    /// stolen key mints nothing on its own. The point is that this is enforced by consensus:
+    /// the four-eyes rule in `treasury-service` is off-chain and a stolen key walks past it.
+    #[serde(default)]
+    pub mint_threshold: u8,
 }
 
 impl ChainInit {
@@ -42,6 +56,31 @@ impl ChainInit {
             Ok(None) => Ok(0),
             Err(e) => Err(format!("failed to read total_supply: {}", e)),
         }
+    }
+
+    /// Every address allowed to sign a `Mint`, canonicalised for comparison.
+    pub fn mint_authority_set(&self) -> Vec<String> {
+        let mut set = vec![canonical_account_address(&self.mint_authority)];
+        for c in &self.mint_cosigners {
+            let canon = canonical_account_address(c);
+            if !set.contains(&canon) {
+                set.push(canon);
+            }
+        }
+        set
+    }
+
+    /// Signatures a Mint needs. Both `0` and `1` mean one, so a genesis that never set the field
+    /// behaves exactly as before it existed.
+    pub fn effective_mint_threshold(&self) -> usize {
+        self.mint_threshold.max(1) as usize
+    }
+
+    /// True when this chain is configured for multi-signature minting. Also decides whether the
+    /// two fields appear in the RLP at all, which is what keeps a single-signer genesis hash
+    /// byte-identical to one produced before these fields existed.
+    pub fn uses_multisig_mint(&self) -> bool {
+        self.mint_threshold > 1
     }
 
     pub fn verify_state(&self, _from: &String, _db: &Database) -> Result<(), String> {
@@ -78,7 +117,10 @@ impl ChainInit {
 
 impl Encodable for ChainInit {
     fn rlp_append(&self, stream: &mut RlpStream) {
-        stream.begin_list(8);
+        // 8 items unless multisig minting is configured, then 10. A single-signer chain therefore
+        // encodes byte-identically to one produced before these fields existed, which is what lets
+        // the running testnet keep its genesis hash while mainnet opts in.
+        stream.begin_list(if self.uses_multisig_mint() { 10 } else { 8 });
         stream.append(&self.chain_id);
         stream.append(&(self.is_testnet as u8));
         stream.append(&self.tx_fee);
@@ -87,14 +129,25 @@ impl Encodable for ChainInit {
         stream.append(&self.mint_authority);
         stream.append(&self.faucet_address);
         stream.append(&self.faucet_allocation);
+        if self.uses_multisig_mint() {
+            stream.append_list::<String, String>(&self.mint_cosigners);
+            stream.append(&self.mint_threshold);
+        }
     }
 }
 
 impl Decodable for ChainInit {
     fn decode(rlp: &Rlp) -> Result<Self, DecoderError> {
-        if !rlp.is_list() || rlp.item_count()? != 8 {
-            return Err(DecoderError::RlpIncorrectListLen);
+        if !rlp.is_list() {
+            return Err(DecoderError::RlpExpectedToBeList);
         }
+        // 8 = a chain from before multisig minting existed; 10 = one that configured it. Any other
+        // length is a genesis this build cannot agree about, which must fail rather than guess.
+        let multisig = match rlp.item_count()? {
+            8 => false,
+            10 => true,
+            _ => return Err(DecoderError::RlpIncorrectListLen),
+        };
         Ok(ChainInit {
             chain_id: rlp.val_at(0)?,
             is_testnet: rlp.val_at::<u8>(1)? != 0,
@@ -104,6 +157,111 @@ impl Decodable for ChainInit {
             mint_authority: rlp.val_at(5)?,
             faucet_address: rlp.val_at(6)?,
             faucet_allocation: rlp.val_at(7)?,
+            mint_cosigners: if multisig { rlp.list_at(8)? } else { Vec::new() },
+            mint_threshold: if multisig { rlp.val_at(9)? } else { 0 },
         })
+    }
+}
+
+#[cfg(test)]
+mod mint_authority_tests {
+    use super::*;
+    use rlp::Rlp;
+
+    const A: &str = "0x00000000000000000000000000000000000000aa";
+    const B: &str = "0x00000000000000000000000000000000000000bb";
+    const C: &str = "0x00000000000000000000000000000000000000cc";
+
+    fn params(cosigners: Vec<String>, threshold: u8) -> ChainInit {
+        ChainInit {
+            chain_id: 2077,
+            is_testnet: true,
+            tx_fee: 1000,
+            ride_request_referrer_fee_bps: 200,
+            ride_offer_referrer_fee_bps: 200,
+            mint_authority: A.to_string(),
+            faucet_address: "0x0000000000000000000000000000000000000000".to_string(),
+            faucet_allocation: 0,
+            mint_cosigners: cosigners,
+            mint_threshold: threshold,
+        }
+    }
+
+    #[test]
+    fn threshold_zero_and_one_both_mean_one() {
+        assert_eq!(params(vec![], 0).effective_mint_threshold(), 1);
+        assert_eq!(params(vec![], 1).effective_mint_threshold(), 1);
+        assert!(!params(vec![], 0).uses_multisig_mint());
+        assert!(!params(vec![], 1).uses_multisig_mint());
+        assert!(params(vec![B.to_string()], 2).uses_multisig_mint());
+    }
+
+    #[test]
+    fn the_authority_set_includes_the_primary_and_dedupes() {
+        let p = params(vec![B.to_string(), C.to_string()], 2);
+        assert_eq!(p.mint_authority_set().len(), 3);
+
+        // A cosigner repeating the primary must not inflate the set, or a 2-of-2 would be
+        // satisfiable by the primary alone.
+        let p = params(vec![A.to_uppercase(), B.to_string()], 2);
+        assert_eq!(
+            p.mint_authority_set().len(),
+            2,
+            "the same address in both fields is one authority"
+        );
+    }
+
+    /// The compatibility guarantee the whole design rests on: a chain that does not use
+    /// multi-signature minting must encode byte-identically to one produced before these fields
+    /// existed, so the running testnet keeps its genesis hash.
+    #[test]
+    fn single_signer_chain_init_encodes_as_eight_items() {
+        let encoded = rlp::encode(&params(vec![], 0));
+        assert_eq!(Rlp::new(&encoded).item_count().unwrap(), 8);
+
+        // And byte-for-byte against a hand-built legacy encoding.
+        let mut legacy = RlpStream::new();
+        legacy.begin_list(8);
+        legacy.append(&2077u64);
+        legacy.append(&1u8);
+        legacy.append(&1000u64);
+        legacy.append(&200u16);
+        legacy.append(&200u16);
+        legacy.append(&A.to_string());
+        legacy.append(&"0x0000000000000000000000000000000000000000".to_string());
+        legacy.append(&0u64);
+        assert_eq!(
+            encoded.to_vec(),
+            legacy.out().to_vec(),
+            "a single-signer genesis must hash exactly as it did before M-of-N existed"
+        );
+    }
+
+    #[test]
+    fn multisig_chain_init_round_trips() {
+        let p = params(vec![B.to_string(), C.to_string()], 2);
+        let encoded = rlp::encode(&p);
+        assert_eq!(Rlp::new(&encoded).item_count().unwrap(), 10);
+        let decoded: ChainInit = rlp::decode(&encoded).unwrap();
+        assert_eq!(decoded, p);
+    }
+
+    #[test]
+    fn single_signer_chain_init_round_trips() {
+        let p = params(vec![], 0);
+        let decoded: ChainInit = rlp::decode(&rlp::encode(&p)).unwrap();
+        assert_eq!(decoded, p);
+    }
+
+    /// A length this build does not know is a genesis it cannot agree about. Guessing would mean
+    /// two nodes computing different hashes from the same bytes.
+    #[test]
+    fn an_unknown_item_count_is_refused() {
+        let mut odd = RlpStream::new();
+        odd.begin_list(9);
+        for _ in 0..9 {
+            odd.append(&1u64);
+        }
+        assert!(rlp::decode::<ChainInit>(&odd.out()).is_err());
     }
 }

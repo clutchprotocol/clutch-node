@@ -34,6 +34,8 @@ fn ci() -> ChainInit {
         mint_authority: FAUCET_PK.to_string(),
         faucet_address: FAUCET_PK.to_string(),
         faucet_allocation: 1_000_000_000_000_000,
+        mint_cosigners: Vec::new(),
+        mint_threshold: 0,
     }
 }
 

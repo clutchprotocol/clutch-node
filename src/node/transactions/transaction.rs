@@ -645,6 +645,7 @@ mod tests {
                 to: "0x1".to_string(),
                 amount: 1,
                 credit_ref: credit_ref.to_string(),
+                cosignatures: Vec::new(),
             }),
         )
     }

@@ -11,6 +11,11 @@
 name: Test
 
 on:
+  # pull_request and workflow_dispatch matter as much as push: without them a branch cannot be
+  # verified before it reaches main, which on a chain that mints money is the wrong way round.
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
   push:
     branches: [main]
     paths:

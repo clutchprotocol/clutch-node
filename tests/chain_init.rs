@@ -12,6 +12,8 @@ fn test_params() -> ChainInit {
         mint_authority: "0x9b6e8afff8329743cac73dbef83ca3cbf9a74c20".to_string(),
         faucet_address: "0xdeb4cfb63db134698e1879ea24904df074726cc0".to_string(),
         faucet_allocation: 1_000_000_000_000_000,
+        mint_cosigners: Vec::new(),
+        mint_threshold: 0,
     }
 }
 
