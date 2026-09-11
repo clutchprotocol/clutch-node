@@ -148,6 +148,7 @@ fn chain_info_supply_tracks_mint_and_burn() {
             amount: 5_000_000,
             credit_ref: "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
                 .to_string(),
+            cosignatures: Vec::new(),
         }),
     );
     mint.sign(AUTHOR_SK);

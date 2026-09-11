@@ -69,6 +69,7 @@ fn signed_mint(sk: &str, from: &str, nonce: u64, to: &str, amount: u64, credit_r
             to: to.to_string(),
             amount,
             credit_ref: credit_ref.to_string(),
+            cosignatures: Vec::new(),
         }),
     );
     tx.sign(sk);

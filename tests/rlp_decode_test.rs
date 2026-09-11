@@ -161,6 +161,7 @@ fn mint_rlp_round_trip_pins_wire_contract() {
         to: "0x4444444444444444444444444444444444444444".to_string(),
         amount: 5_000_000,
         credit_ref: "aa".repeat(32),
+        cosignatures: Vec::new(),
     };
     let function_call = FunctionCall::Mint(mint.clone());
 
