@@ -126,7 +126,7 @@ fn ride_pay_emits_referrer_request_fee_effect() {
             // No fee flows through this test — it drives per-type state_transaction directly
             // and asserts only the downstream RidePay referrer effect, not the passenger's
             // post-acceptance balance.
-            ride_acceptance.state_transaction(&PASSENGER.to_string(), &ride_acceptance_hash, &db, 0),
+            ride_acceptance.state_transaction(&PASSENGER.to_string(), &ride_acceptance_hash, &db, 0, 0),
         );
     }
 
