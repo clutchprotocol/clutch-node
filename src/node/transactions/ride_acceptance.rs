@@ -662,8 +662,14 @@ mod auto_release_tests {
     }
 
     /// A window near u64::MAX must not wrap past the current time and release immediately.
+    ///
+    /// Checked at a realistic "now" rather than at u64::MAX: saturating_add pins the deadline AT
+    /// u64::MAX, so asking whether u64::MAX has been reached is true and says nothing. Wrapping
+    /// arithmetic would put the deadline in the past and make this pass instantly, which is the
+    /// bug being excluded.
     #[test]
     fn an_absurd_window_saturates_rather_than_wrapping() {
-        assert!(!elapsed(Some(ACCEPTED), u64::MAX, u64::MAX));
+        assert!(!elapsed(Some(ACCEPTED), u64::MAX, ACCEPTED + 1_000_000));
+        assert!(!elapsed(Some(ACCEPTED), u64::MAX - 1, u64::MAX - 2));
     }
 }
