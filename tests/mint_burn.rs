@@ -31,6 +31,7 @@ fn ci() -> ChainInit {
         faucet_allocation: 1_000_000_000_000_000,
         mint_cosigners: Vec::new(),
         mint_threshold: 0,
+        ride_auto_release_secs: 0,
     }
 }
 

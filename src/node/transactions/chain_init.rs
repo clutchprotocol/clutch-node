@@ -37,6 +37,18 @@ pub struct ChainInit {
     /// the four-eyes rule in `treasury-service` is off-chain and a stolen key walks past it.
     #[serde(default)]
     pub mint_threshold: u8,
+    /// Seconds after a `RideAcceptance` before the held fare stops being the rider's to reclaim.
+    /// `0` disables the rule entirely, which is every chain that existed before it.
+    ///
+    /// Genesis-committed because it decides who receives money. A node running a different value
+    /// would compute a different balance from the same block — the consensus-divergence class this
+    /// struct exists to prevent. That is also why it cannot be per-acceptance: a rider choosing
+    /// their own window would choose one that never expires.
+    ///
+    /// Seconds rather than blocks, because block cadence is `60 / authority_count` and changing the
+    /// validator set would silently change the window.
+    #[serde(default)]
+    pub ride_auto_release_secs: u64,
 }
 
 impl ChainInit {
@@ -74,6 +86,11 @@ impl ChainInit {
     /// behaves exactly as before it existed.
     pub fn effective_mint_threshold(&self) -> usize {
         self.mint_threshold.max(1) as usize
+    }
+
+    /// True when the held fare auto-releases to the driver after a window.
+    pub fn uses_auto_release(&self) -> bool {
+        self.ride_auto_release_secs > 0
     }
 
     /// True when this chain is configured for multi-signature minting. Also decides whether the
@@ -120,7 +137,18 @@ impl Encodable for ChainInit {
         // 8 items unless multisig minting is configured, then 10. A single-signer chain therefore
         // encodes byte-identically to one produced before these fields existed, which is what lets
         // the running testnet keep its genesis hash while mainnet opts in.
-        stream.begin_list(if self.uses_multisig_mint() { 10 } else { 8 });
+        // 8, 10 or 11 items. Each step is additive and only appears when the feature is in use,
+        // so a chain that uses neither encodes byte-identically to one from before either existed
+        // and keeps its genesis hash. 11 carries the mint fields even at their defaults, because
+        // a length alone has to say unambiguously which fields are present.
+        let items = if self.uses_auto_release() {
+            11
+        } else if self.uses_multisig_mint() {
+            10
+        } else {
+            8
+        };
+        stream.begin_list(items);
         stream.append(&self.chain_id);
         stream.append(&(self.is_testnet as u8));
         stream.append(&self.tx_fee);
@@ -129,9 +157,12 @@ impl Encodable for ChainInit {
         stream.append(&self.mint_authority);
         stream.append(&self.faucet_address);
         stream.append(&self.faucet_allocation);
-        if self.uses_multisig_mint() {
+        if self.uses_multisig_mint() || self.uses_auto_release() {
             stream.append_list::<String, String>(&self.mint_cosigners);
             stream.append(&self.mint_threshold);
+        }
+        if self.uses_auto_release() {
+            stream.append(&self.ride_auto_release_secs);
         }
     }
 }
@@ -143,11 +174,13 @@ impl Decodable for ChainInit {
         }
         // 8 = a chain from before multisig minting existed; 10 = one that configured it. Any other
         // length is a genesis this build cannot agree about, which must fail rather than guess.
-        let multisig = match rlp.item_count()? {
-            8 => false,
-            10 => true,
+        let (has_mint_fields, has_auto_release) = match rlp.item_count()? {
+            8 => (false, false),
+            10 => (true, false),
+            11 => (true, true),
             _ => return Err(DecoderError::RlpIncorrectListLen),
         };
+        let multisig = has_mint_fields;
         Ok(ChainInit {
             chain_id: rlp.val_at(0)?,
             is_testnet: rlp.val_at::<u8>(1)? != 0,
@@ -159,6 +192,7 @@ impl Decodable for ChainInit {
             faucet_allocation: rlp.val_at(7)?,
             mint_cosigners: if multisig { rlp.list_at(8)? } else { Vec::new() },
             mint_threshold: if multisig { rlp.val_at(9)? } else { 0 },
+            ride_auto_release_secs: if has_auto_release { rlp.val_at(10)? } else { 0 },
         })
     }
 }
@@ -263,5 +297,64 @@ mod mint_authority_tests {
             odd.append(&1u64);
         }
         assert!(rlp::decode::<ChainInit>(&odd.out()).is_err());
+    }
+}
+
+#[cfg(test)]
+mod auto_release_encoding_tests {
+    use super::*;
+    use rlp::Rlp;
+
+    fn params(threshold: u8, auto_release: u64) -> ChainInit {
+        ChainInit {
+            chain_id: 2077,
+            is_testnet: true,
+            tx_fee: 1000,
+            ride_request_referrer_fee_bps: 200,
+            ride_offer_referrer_fee_bps: 200,
+            mint_authority: "0x00000000000000000000000000000000000000aa".to_string(),
+            faucet_address: "0x0000000000000000000000000000000000000000".to_string(),
+            faucet_allocation: 0,
+            mint_cosigners: if threshold > 1 {
+                vec!["0x00000000000000000000000000000000000000bb".to_string()]
+            } else {
+                Vec::new()
+            },
+            mint_threshold: threshold,
+            ride_auto_release_secs: auto_release,
+        }
+    }
+
+    /// Each feature is additive, and a chain using neither must still encode as it always did.
+    #[test]
+    fn the_three_shapes_are_eight_ten_and_eleven() {
+        assert_eq!(Rlp::new(&rlp::encode(&params(0, 0))).item_count().unwrap(), 8);
+        assert_eq!(Rlp::new(&rlp::encode(&params(2, 0))).item_count().unwrap(), 10);
+        assert_eq!(Rlp::new(&rlp::encode(&params(0, 7200))).item_count().unwrap(), 11);
+        assert_eq!(Rlp::new(&rlp::encode(&params(2, 7200))).item_count().unwrap(), 11);
+    }
+
+    #[test]
+    fn every_shape_round_trips() {
+        for p in [params(0, 0), params(2, 0), params(0, 7200), params(2, 7200)] {
+            let decoded: ChainInit = rlp::decode(&rlp::encode(&p)).unwrap();
+            assert_eq!(decoded, p);
+        }
+    }
+
+    /// Auto-release without multisig still carries the mint fields at their defaults, because the
+    /// item count alone has to say unambiguously which fields are present.
+    #[test]
+    fn auto_release_alone_still_decodes_the_mint_fields_as_defaults() {
+        let decoded: ChainInit = rlp::decode(&rlp::encode(&params(0, 7200))).unwrap();
+        assert!(decoded.mint_cosigners.is_empty());
+        assert_eq!(decoded.mint_threshold, 0);
+        assert_eq!(decoded.ride_auto_release_secs, 7200);
+    }
+
+    #[test]
+    fn uses_auto_release_tracks_the_value() {
+        assert!(!params(0, 0).uses_auto_release());
+        assert!(params(0, 1).uses_auto_release());
     }
 }

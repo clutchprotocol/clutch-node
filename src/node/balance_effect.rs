@@ -12,6 +12,10 @@ pub enum BalanceEffectKind {
     ReferrerRequestFee,
     ReferrerOfferFee,
     RideCancelRefund,
+    /// The held remainder released to the DRIVER because the auto-release window expired.
+    /// A separate kind from `RideCancelRefund` on purpose: same transaction, opposite direction,
+    /// and a ledger that called this a refund would be lying about who received the money.
+    RideAutoRelease,
     BlockReward,
     Mint,
     Burn,

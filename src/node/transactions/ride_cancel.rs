@@ -92,12 +92,29 @@ impl RideCancel {
         Ok(())
     }
 
+    /// Settles a cancelled trip.
+    ///
+    /// Before the auto-release window expires this refunds the unpaid remainder to the rider,
+    /// which is what it has always done and is the rider's protection: they stop paying and cancel,
+    /// losing only what they already released.
+    ///
+    /// After the window expires the same transaction pays that remainder to the **driver** instead.
+    /// That closes the gap this mechanism exists for. Until now a rider could take the ride and
+    /// simply never send the rest of the `RidePay` instalments; the driver's only move was to
+    /// cancel, which refunded the money to the rider. The driver had performed and had no way to
+    /// be paid. Inaction favoured the party who owed money, and now it favours the one who is owed.
+    ///
+    /// Deliberately the same transaction type rather than a new one. Nothing else needs to change:
+    /// no new state machine, no settlement pass scanning every open trip each block, and every
+    /// existing client keeps working.
     pub fn state_transaction(
         &self,
         from: &String,
         tx_hash: &String,
         db: &Database,
         fee: u64,
+        auto_release_secs: u64,
+        block_timestamp: u64,
     ) -> Vec<StateUpdate> {
         let ride_cancel_key = Self::construct_ride_cancel_key(&tx_hash);
         let ride_cancel_value = serde_json::to_string(&self)
@@ -141,6 +158,28 @@ impl RideCancel {
         let sender_is_passenger =
             canonical_account_address(from) == canonical_account_address(&passenger);
 
+        // Who the held remainder belongs to now. Past the window it is the driver's, whoever
+        // submits the cancel — including the rider, for whom cancelling late no longer helps.
+        let released_to_driver = RideAcceptance::auto_release_elapsed(
+            ride_acceptance_tx_hash,
+            db,
+            auto_release_secs,
+            block_timestamp,
+        );
+
+        let driver = RideOffer::get_from(&ride_acceptance.ride_offer_transaction_hash, db)
+            .ok()
+            .flatten();
+
+        // A driver address that cannot be read is the one case where paying out would be guessing.
+        // Fall back to the refund rather than send the money somewhere unverified.
+        let (beneficiary, effect_kind) = match (released_to_driver, driver.as_ref()) {
+            (true, Some(d)) => (d.clone(), BalanceEffectKind::RideAutoRelease),
+            _ => (passenger.clone(), BalanceEffectKind::RideCancelRefund),
+        };
+        let beneficiary_is_sender =
+            canonical_account_address(from) == canonical_account_address(&beneficiary);
+
         // ponytail: when the passenger cancels, refund credit and fee debit hit the SAME
         // account — merge into one write. Driver-cancel: driver's key is otherwise
         // untouched, standalone fee debit is safe.
@@ -148,20 +187,23 @@ impl RideCancel {
             StateUpdate::storage_only(ride_cancel_key, ride_cancel_value),
             StateUpdate::storage_only(ride_acceptance_cancel_key, ride_acceptance_cancel_value),
         ];
-        if sender_is_passenger {
+        // Merge the credit and the fee debit when they land on the same account, since two writes
+        // to one balance in a single transaction is the shape that loses one of them.
+        let _ = sender_is_passenger;
+        if beneficiary_is_sender {
             updates.extend(AccountState::apply_balance_change_with_fee(
-                &passenger,
+                &beneficiary,
                 remaining_amount,
                 fee,
-                BalanceEffectKind::RideCancelRefund,
+                effect_kind,
                 None,
                 db,
             ));
         } else {
             updates.push(AccountState::apply_balance_change(
-                &passenger,
+                &beneficiary,
                 remaining_amount,
-                BalanceEffectKind::RideCancelRefund,
+                effect_kind,
                 None,
                 db,
             ));

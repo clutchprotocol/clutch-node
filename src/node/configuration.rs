@@ -47,6 +47,11 @@ pub struct AppConfig {
     /// Signatures a Mint requires. 0 and 1 both mean single-signer. Genesis-committed.
     #[serde(default)]
     pub mint_threshold: u8,
+    /// Seconds after a RideAcceptance before the held fare stops being the rider to reclaim and a
+    /// cancel pays the driver instead. 0 disables it. Genesis-committed, so every node of a chain
+    /// must carry the same value.
+    #[serde(default)]
+    pub ride_auto_release_secs: u64,
     pub ride_request_referrer_fee_bps: u16,
     pub ride_offer_referrer_fee_bps: u16,
     pub sync_enabled: bool,

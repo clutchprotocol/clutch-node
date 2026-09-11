@@ -349,7 +349,7 @@ impl Block {
 
         // Handle transactions State
         for (tx_index, tx) in block.transactions.iter().enumerate() {
-            let updates = tx.state_transaction(&db, &params, &block.author);
+            let updates = tx.state_transaction(&db, &params, &block.author, block.timestamp);
 
             let mut tx_effects = Vec::new();
             for update in updates {

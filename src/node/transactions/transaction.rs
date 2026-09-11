@@ -493,6 +493,7 @@ impl Transaction {
         db: &Database,
         params: &ChainInit,
         block_author: &str,
+        block_timestamp: u64,
     ) -> Vec<StateUpdate> {
         let fee = self.effective_fee(block_author, params);
         let mut states = match &self.data {
@@ -504,7 +505,7 @@ impl Transaction {
                 ride_offer.state_transaction(&self.from, &self.hash, db)
             }
             FunctionCall::RideAcceptance(ride_acceptance) => {
-                ride_acceptance.state_transaction(&self.from, &self.hash, db, fee)
+                ride_acceptance.state_transaction(&self.from, &self.hash, db, fee, block_timestamp)
             }
             FunctionCall::RidePay(ride_pay) => ride_pay.state_transaction(
                 &self.hash,
@@ -515,7 +516,14 @@ impl Transaction {
                 fee,
             ),
             FunctionCall::RideCancel(ride_cancel) => {
-                ride_cancel.state_transaction(&self.from, &self.hash, db, fee)
+                ride_cancel.state_transaction(
+                    &self.from,
+                    &self.hash,
+                    db,
+                    fee,
+                    params.ride_auto_release_secs,
+                    block_timestamp,
+                )
             }
             FunctionCall::Mint(mint) => mint.state_transaction(&self.hash, db),
             FunctionCall::Burn(burn) => burn.state_transaction(&self.from, &self.hash, db, fee),

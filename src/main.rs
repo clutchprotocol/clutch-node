@@ -51,6 +51,7 @@ fn initialize_blockchain(config: &AppConfig) -> Blockchain {
         faucet_allocation: config.faucet_allocation,
         mint_cosigners: config.mint_cosigners.clone(),
         mint_threshold: config.mint_threshold,
+        ride_auto_release_secs: config.ride_auto_release_secs,
     };
 
     Blockchain::new(
