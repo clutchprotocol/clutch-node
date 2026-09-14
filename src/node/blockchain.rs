@@ -183,6 +183,17 @@ impl Blockchain {
             // here are an i64 next to the error arm's unit and will not compile.
             Ok(Some(b)) => {
                 metric::LATEST_BLOCK_INDEX.set(b.index as i64);
+                // The hash-labelled series needs the same treatment, and for a sharper reason: the
+                // explorer's indexer reads BOTH `latest_block_index` and `latest_block{block_hash}`
+                // and refuses the head if either is missing. Published only by `add_block_to_chain`,
+                // it was absent from boot until this node next imported a block -- so a restart
+                // during a halted chain left the indexer permanently blind and the explorer empty,
+                // which is how the stage outage of 2026-09-14 was first reported.
+                metric::LATEST_BLOCK
+                    .get_or_create(&metric::BlockLabels {
+                        block_hash: b.hash.to_string(),
+                    })
+                    .set(b.index as i64);
             }
             // No block yet is genuinely 0. A read FAILURE is not, so it is left alone rather than
             // published as an empty chain.
