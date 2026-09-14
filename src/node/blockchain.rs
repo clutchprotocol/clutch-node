@@ -240,6 +240,51 @@ impl Blockchain {
         AccountState::get_current_nonce(public_key, &self.db)
     }
 
+    /// The nonce a caller should put on its NEXT transaction.
+    ///
+    /// Not simply `confirmed + 1`. A transaction sitting in the pool has not moved the confirmed
+    /// nonce yet, so a caller that submits twice in quick succession — which is ordinary, and is
+    /// exactly what the treasury's outbox does when it has several mints to send — got the same
+    /// answer both times and signed two transactions with one nonce. The first to be mined wins and
+    /// the second becomes permanently invalid.
+    ///
+    /// That is not a lost transaction, it is a stopped chain: an invalid transaction cannot leave
+    /// the pool, and every candidate block carries the whole pool. Stage halted at block 84 on
+    /// 2026-09-14 this way.
+    ///
+    /// Walking upward from the confirmed nonce also fills gaps rather than skipping past them: if
+    /// the pool holds N+1 and N+3, the answer is N+2, which is the transaction that would let both
+    /// of the others become valid.
+    pub fn get_next_nonce(&self, public_key: &String) -> Result<u64, String> {
+        Self::next_nonce_for(&self.db, public_key)
+    }
+
+    /// Split from the method so it can be tested against a scratch database, like the pool filters
+    /// above, rather than needing a whole Blockchain.
+    fn next_nonce_for(db: &Database, public_key: &String) -> Result<u64, String> {
+        use crate::node::transactions::address::canonical_account_address;
+
+        let confirmed = AccountState::get_current_nonce(public_key, db)?;
+        let sender = canonical_account_address(public_key);
+
+        // A pool read failure must not silently downgrade this to `confirmed + 1`: that is the
+        // colliding answer this function exists to stop giving.
+        let pooled = TransactionPool::get_transactions(db)
+            .map_err(|e| format!("could not read the transaction pool for {}: {}", public_key, e))?;
+
+        let taken: std::collections::HashSet<u64> = pooled
+            .iter()
+            .filter(|tx| canonical_account_address(&tx.from) == sender)
+            .map(|tx| tx.nonce)
+            .collect();
+
+        let mut next = confirmed + 1;
+        while taken.contains(&next) {
+            next += 1;
+        }
+        Ok(next)
+    }
+
     pub fn shutdown_blockchain(&mut self) {
         if !self.developer_mode {
             return;
@@ -619,6 +664,16 @@ mod tests {
             .expect("seed nonce");
     }
 
+    /// Put a transaction in the pool WITHOUT `TransactionPool::add_transaction`, which first
+    /// validates the signature. `tf` builds unsigned transactions, and what these tests exercise
+    /// is the nonce arithmetic over whatever the pool holds, not the signature check -- so the
+    /// test writes the same key and bytes `add_transaction` would have written.
+    fn pool(db: &Database, transaction: &Transaction) {
+        let key = TransactionPool::construct_tx_pool_key(&transaction.hash);
+        let value = serde_json::to_string(transaction).unwrap().into_bytes();
+        db.put("tx_pool", &key, &value).expect("pool transaction");
+    }
+
     fn scratch_db(name: &str) -> Database {
         let _ = std::fs::remove_dir_all(format!("{}.db", name));
         Database::new_db(name)
@@ -627,6 +682,50 @@ mod tests {
     fn drop_scratch(mut db: Database, name: &str) {
         db.close();
         db.delete_database(name).ok();
+    }
+
+    #[test]
+    fn next_nonce_skips_what_is_already_queued() {
+        // The outbox case that halted stage: two mints sent in one pass. Before this, both were
+        // told nonce 1, both were signed with it, and the second could never become valid.
+        let name = "clutch-node-test-nonce-queued";
+        let db = scratch_db(name);
+        seed_nonce(&db, "0xA", 0);
+
+        let first = Blockchain::next_nonce_for(&db, &"0xA".to_string()).unwrap();
+        pool(&db, &tf("0xA", first, "0xC"));
+        let second = Blockchain::next_nonce_for(&db, &"0xA".to_string()).unwrap();
+
+        drop_scratch(db, name);
+        assert_eq!(first, 1);
+        assert_eq!(second, 2, "a queued nonce must not be handed out twice");
+    }
+
+    #[test]
+    fn next_nonce_fills_a_gap_rather_than_stepping_over_it() {
+        // Pool holds 1 and 3. The useful answer is 2 -- the transaction that lets both of the
+        // others become valid -- not 4, which would leave 3 stranded for ever.
+        let name = "clutch-node-test-nonce-gap";
+        let db = scratch_db(name);
+        seed_nonce(&db, "0xA", 0);
+        pool(&db, &tf("0xA", 1, "0xC"));
+        pool(&db, &tf("0xA", 3, "0xD"));
+
+        let next = Blockchain::next_nonce_for(&db, &"0xA".to_string()).unwrap();
+        drop_scratch(db, name);
+        assert_eq!(next, 2);
+    }
+
+    #[test]
+    fn next_nonce_ignores_other_senders() {
+        let name = "clutch-node-test-nonce-other";
+        let db = scratch_db(name);
+        seed_nonce(&db, "0xA", 4);
+        pool(&db, &tf("0xB", 5, "0xC"));
+
+        let next = Blockchain::next_nonce_for(&db, &"0xA".to_string()).unwrap();
+        drop_scratch(db, name);
+        assert_eq!(next, 5, "another account's queue says nothing about this one");
     }
 
     #[test]

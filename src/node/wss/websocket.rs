@@ -256,9 +256,11 @@ impl WebSocket {
         // Get the blockchain lock
         let blockchain = blockchain.lock().await;
         
-        match blockchain.get_current_nonce(&params.address) {
-            Ok(nonce) => {
-                let next_nonce = nonce + 1;
+        // The pool-aware answer: `get_current_nonce() + 1` ignored anything already queued, so two
+        // submissions in quick succession received the same nonce and the second could never be
+        // valid. See Blockchain::get_next_nonce.
+        match blockchain.get_next_nonce(&params.address) {
+            Ok(next_nonce) => {
                 Some(json_rpc_success_response(serde_json::json!({ "nonce": next_nonce }), id))
             }
             Err(e) => {
