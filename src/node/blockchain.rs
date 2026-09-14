@@ -391,7 +391,12 @@ impl Blockchain {
         let index = latest_block.index + 1;
         let previous_hash = latest_block.hash.clone();
         let mut transactions = match TransactionPool::get_transactions(&self.db) {
-            Ok(transactions) => Self::drop_intra_block_conflicts(&self.db, transactions),
+            // Evict first: a transaction that can never be valid would otherwise be carried into
+            // the candidate block and fail the whole thing, every second, for ever.
+            Ok(transactions) => Self::drop_intra_block_conflicts(
+                &self.db,
+                Self::evict_permanently_invalid(&self.db, transactions),
+            ),
             Err(e) => return Err(format!("Failed to get transactions from pool: {}", e)),
         };
 
@@ -438,6 +443,42 @@ impl Blockchain {
     /// Ordering is lowest nonce, tie-broken by hash, so every node keeps the same winner;
     /// the losers stay in the pool for a later block.
     /// ponytail: one tx/account/block; lift with incremental intra-block state.
+    /// Transactions that can never become valid again, removed from the pool rather than retried
+    /// until the end of time.
+    ///
+    /// A pooled transaction is deleted only by the import of a block carrying it. So a transaction
+    /// that fails validation is never included, never imported, and never removed — and because
+    /// `author_new_block` puts the whole pool into its candidate block, one such transaction makes
+    /// every block fail validation. The chain stops. That is not hypothetical: stage halted at
+    /// block 84 on 2026-09-14 behind a single mint whose nonce the chain had already consumed, and
+    /// it stayed there for hours.
+    ///
+    /// Only the provably-permanent case is dropped. An account's nonce never decreases, so
+    /// `nonce <= last` can never satisfy `nonce == last + 1` again. A nonce ABOVE the next one is
+    /// a gap, which the transaction that fills it may still close, so those are left alone.
+    ///
+    /// A nonce that cannot be read is not evidence of anything and the transaction is kept.
+    fn evict_permanently_invalid(db: &Database, transactions: Vec<Transaction>) -> Vec<Transaction> {
+        transactions
+            .into_iter()
+            .filter(|tx| {
+                match AccountState::get_current_nonce(&tx.from, db) {
+                    Ok(last) if tx.nonce <= last => {
+                        warn!(
+                            "evicting permanently invalid transaction {} from {}: nonce {}, chain is already at {}",
+                            tx.hash, tx.from, tx.nonce, last
+                        );
+                        if let Err(e) = TransactionPool::remove_transaction(db, &tx.hash) {
+                            error!("could not evict {} from the pool: {}", tx.hash, e);
+                        }
+                        false
+                    }
+                    _ => true,
+                }
+            })
+            .collect()
+    }
+
     fn drop_intra_block_conflicts(
         db: &Database,
         mut transactions: Vec<Transaction>,
@@ -566,6 +607,18 @@ mod tests {
     /// The filter needs a `Database` to resolve RidePay/RideCancel counterparties. None of
     /// these cases reads state, so any empty DB will do — one per test so they can still run
     /// in parallel, deleted at the end so re-runs start clean.
+    /// Write an account's nonce the way the chain stores it: big-endian u64 under
+    /// `account_nonce_<canonical>` in the `state` column family. There is no setter on
+    /// `AccountState` -- nonces only ever move by applying a transaction -- so the test writes the
+    /// same bytes `increase_account_nonce_key` would have produced.
+    fn seed_nonce(db: &Database, address: &str, nonce: u64) {
+        use crate::node::transactions::address::canonical_account_address;
+        let key = format!("account_nonce_{}", canonical_account_address(address)).into_bytes();
+        let value = nonce.to_be_bytes().to_vec();
+        db.write(vec![("state", key.as_slice(), Some(value.as_slice()))])
+            .expect("seed nonce");
+    }
+
     fn scratch_db(name: &str) -> Database {
         let _ = std::fs::remove_dir_all(format!("{}.db", name));
         Database::new_db(name)
@@ -574,6 +627,37 @@ mod tests {
     fn drop_scratch(mut db: Database, name: &str) {
         db.close();
         db.delete_database(name).ok();
+    }
+
+    #[test]
+    fn evicts_a_nonce_the_chain_has_already_consumed() {
+        // The stage halt of 2026-09-14 in miniature: a transaction whose nonce the account has
+        // already used. Kept in the pool it joins every candidate block, fails validation, and
+        // takes the block with it -- so the chain stops and cannot restart, because the only thing
+        // that removes a pooled transaction is the import of a block carrying it.
+        let name = "clutch-node-test-evict-stale";
+        let db = scratch_db(name);
+
+        // Account nonce 5 on chain; a pooled transaction still carrying 3.
+        seed_nonce(&db, "0xA", 5);
+        let kept = Blockchain::evict_permanently_invalid(&db, vec![tf("0xA", 3, "0xC")]);
+        drop_scratch(db, name);
+
+        assert!(kept.is_empty(), "a consumed nonce can never be valid again");
+    }
+
+    #[test]
+    fn keeps_a_nonce_gap_because_it_may_still_be_filled() {
+        // Above the next expected nonce is NOT permanently invalid: the transaction that closes
+        // the gap may yet arrive. Evicting these would drop good work on a busy pool.
+        let name = "clutch-node-test-evict-gap";
+        let db = scratch_db(name);
+
+        seed_nonce(&db, "0xA", 5);
+        let kept = Blockchain::evict_permanently_invalid(&db, vec![tf("0xA", 9, "0xC")]);
+        drop_scratch(db, name);
+
+        assert_eq!(kept.len(), 1, "a gap may close; only the past is permanent");
     }
 
     #[test]
