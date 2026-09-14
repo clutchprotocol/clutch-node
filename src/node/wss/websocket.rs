@@ -681,6 +681,14 @@ pub fn build_chain_info_response(
         "ride_request_referrer_fee_bps": params.ride_request_referrer_fee_bps,
         "ride_offer_referrer_fee_bps": params.ride_offer_referrer_fee_bps,
         "mint_authority": params.mint_authority,
+        // How long after acceptance a cancel pays the DRIVER rather than refunding the passenger,
+        // and 0 when the chain does not do that at all.
+        //
+        // Exposed because it is the one genesis parameter here that changes who receives money and
+        // was invisible from outside the node: an operator could not confirm which value a chain
+        // actually runs, and a client could not tell a rider how long a cancel still refunds them.
+        // Both had to read the node's config file, which is not something a client has.
+        "ride_auto_release_secs": params.ride_auto_release_secs,
         // Decimal string, not a bare number: total_supply is the one field here
         // that can realistically exceed 2^53 (~9.007e15, ~$9B at this peg's 1
         // USD = 1,000,000 CLT), where a JSON number rounds silently and the
