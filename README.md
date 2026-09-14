@@ -22,12 +22,14 @@ Clutch Node is the blockchain core for Clutch Protocol — Aura consensus, custo
 | 2 | RideOffer | Driver offer |
 | 3 | RideAcceptance | Passenger accepts offer |
 | 4 | RidePay | Payment (partial OK) |
-| 5 | RideCancel | Cancel active trip |
+| 5 | RideCancel | Cancel active trip. Refunds the unpaid fare to the passenger, or releases it to the driver once `ride_auto_release_secs` has passed since acceptance |
 | 8 | RideRequestCancel | Cancel pending request |
 
 ## JSON-RPC (WebSocket)
 
-`send_raw_transaction`, `get_next_nonce`, `get_account_balance`, `list_ride_requests`, `list_ride_offers`, `list_active_trips`, `list_completed_trips`, `list_recent_trips`, `get_block_by_index`
+`send_raw_transaction`, `get_next_nonce`, `get_account_balance`, `list_ride_requests`, `list_ride_offers`, `list_active_trips`, `list_completed_trips`, `list_recent_trips`, `get_block_by_index`, `get_chain_info`
+
+`get_chain_info` reports the genesis parameters a chain actually committed, plus supply and sync state. It is the only way to read those values from outside the node -- the config file on disk is what a node was *told*, not what its chain carries.
 
 Apps typically use [clutch-hub-api](https://github.com/clutchprotocol/clutch-hub-api) instead of calling the node directly.
 
@@ -141,8 +143,11 @@ A transaction whose sender is the block author pays no fee to itself.
 
 These live in `config/node/{env}.toml` and are committed to state by the genesis `ChainInit`
 transaction, so they are part of the genesis hash: **all nodes on a network must carry
-identical values or they cannot peer**. None of them is optional — a config missing any key
-below fails to deserialize at boot.
+identical values or they cannot peer**.
+
+The keys below the divider are optional (`#[serde(default)]`); the rest are not, and a config
+missing one fails to deserialize at boot. Optional does not mean absent from consensus: omitting one
+commits its default into the genesis hash just as firmly as setting it.
 
 ```toml
 chain_id = 2077                        # signed into every tx hash; replay-isolates networks
@@ -153,6 +158,14 @@ faucet_address = "0x..."               # genesis-funded account (testnet only)
 faucet_allocation = 1000000000000000   # its balance in base units, <= i64::MAX
 ride_request_referrer_fee_bps = 200    # basis points (200 bps = 2%), floor-rounded
 ride_offer_referrer_fee_bps = 200      # renamed from the old percent-based fields
+
+# Optional. Omitted means the default, and the default is committed to the genesis hash too.
+ride_auto_release_secs = 7200          # 0 disables. After this many seconds from acceptance a
+                                       # RideCancel pays the DRIVER rather than refunding the
+                                       # passenger. It decides who receives money, which is why it
+                                       # is consensus and not a service setting.
+mint_cosigners = ["0x...", "0x..."]    # addresses that may co-sign a Mint alongside mint_authority
+mint_threshold = 2                     # signatures required; 0 or 1 means mint_authority alone
 ```
 
 ## CLT Economics
