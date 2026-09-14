@@ -10,7 +10,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::signal;
 use tokio::sync::{mpsc, oneshot, Mutex};
-use tracing::{debug, error, info};
+use tracing::{debug, error, info, warn};
 
 pub struct NodeServices;
 
@@ -128,11 +128,28 @@ impl NodeServices {
     ) {
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+            // A stalled chain used to produce NO log at all. This loop ticks every second and
+            // fails on most of them by design -- an authority that does not own the current slot
+            // cannot author, and an idle chain already holding this slot's block should not --
+            // so the per-tick error is rightly `debug`. The consequence was that three nodes sat
+            // at the same height for hours with nothing above `debug` to say so, and the first
+            // sign of it was the block explorer looking empty.
+            //
+            // Each authority owns one slot in `authorities.len()`, so on a healthy chain this
+            // node authors roughly every `step_duration * authorities.len()` seconds -- 60s for
+            // the three-node stage set. Five minutes of failing every single tick is therefore
+            // not a quiet period, it is a stall.
+            let stall_after = Duration::from_secs(300);
+            let repeat_every = Duration::from_secs(120);
+            let mut last_success = tokio::time::Instant::now();
+            let mut last_warned: Option<tokio::time::Instant> = None;
             loop {
                 interval.tick().await;
                 let blockchain = blockchain.lock().await;
                 match blockchain.author_new_block() {
                     Ok(block) => {
+                        last_success = tokio::time::Instant::now();
+                        last_warned = None;
                         let encoded_block = encode(&block);
                         P2PServer::gossip_message_command(
                             command_tx_p2p.clone(),
@@ -143,6 +160,18 @@ impl NodeServices {
                     }
                     Err(e) => {
                         debug!("Error authoring new block: {:?}", e);
+                        let stalled_for = last_success.elapsed();
+                        let due = last_warned.map_or(true, |w| w.elapsed() >= repeat_every);
+                        if stalled_for >= stall_after && due {
+                            // The error itself, not a generic message: which of the several
+                            // reasons authoring can fail is the whole question when this fires.
+                            warn!(
+                                "authored no block for {}s — last reason: {}",
+                                stalled_for.as_secs(),
+                                e
+                            );
+                            last_warned = Some(tokio::time::Instant::now());
+                        }
                     }
                 }
             }
