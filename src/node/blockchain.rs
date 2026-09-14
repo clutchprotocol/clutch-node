@@ -664,6 +664,16 @@ mod tests {
             .expect("seed nonce");
     }
 
+    /// Put a transaction in the pool WITHOUT `TransactionPool::add_transaction`, which first
+    /// validates the signature. `tf` builds unsigned transactions, and what these tests exercise
+    /// is the nonce arithmetic over whatever the pool holds, not the signature check -- so the
+    /// test writes the same key and bytes `add_transaction` would have written.
+    fn pool(db: &Database, transaction: &Transaction) {
+        let key = TransactionPool::construct_tx_pool_key(&transaction.hash);
+        let value = serde_json::to_string(transaction).unwrap().into_bytes();
+        db.put("tx_pool", &key, &value).expect("pool transaction");
+    }
+
     fn scratch_db(name: &str) -> Database {
         let _ = std::fs::remove_dir_all(format!("{}.db", name));
         Database::new_db(name)
@@ -683,7 +693,7 @@ mod tests {
         seed_nonce(&db, "0xA", 0);
 
         let first = Blockchain::next_nonce_for(&db, &"0xA".to_string()).unwrap();
-        TransactionPool::add_transaction(&db, &tf("0xA", first, "0xC")).unwrap();
+        pool(&db, &tf("0xA", first, "0xC"));
         let second = Blockchain::next_nonce_for(&db, &"0xA".to_string()).unwrap();
 
         drop_scratch(db, name);
@@ -698,8 +708,8 @@ mod tests {
         let name = "clutch-node-test-nonce-gap";
         let db = scratch_db(name);
         seed_nonce(&db, "0xA", 0);
-        TransactionPool::add_transaction(&db, &tf("0xA", 1, "0xC")).unwrap();
-        TransactionPool::add_transaction(&db, &tf("0xA", 3, "0xD")).unwrap();
+        pool(&db, &tf("0xA", 1, "0xC"));
+        pool(&db, &tf("0xA", 3, "0xD"));
 
         let next = Blockchain::next_nonce_for(&db, &"0xA".to_string()).unwrap();
         drop_scratch(db, name);
@@ -711,7 +721,7 @@ mod tests {
         let name = "clutch-node-test-nonce-other";
         let db = scratch_db(name);
         seed_nonce(&db, "0xA", 4);
-        TransactionPool::add_transaction(&db, &tf("0xB", 5, "0xC")).unwrap();
+        pool(&db, &tf("0xB", 5, "0xC"));
 
         let next = Blockchain::next_nonce_for(&db, &"0xA".to_string()).unwrap();
         drop_scratch(db, name);
