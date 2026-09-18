@@ -66,7 +66,7 @@ docker compose up -d               # 3-node local net from ghcr image (this repo
 ```
 
 - Tests in `tests/` (`ride_sharing.rs`, `author_block.rs`, `balance_effects.rs`, `transfer.rs`, `referrer_account.rs`, `rlp_decode_test.rs`, `p2p_server_tests.rs`, `chain_genesis.rs`, `chain_init.rs`, `mint_burn.rs`, `tx_fee.rs`, `db_error_handling.rs`) hit **real RocksDB instances in the cwd**; DB-touching tests are `#[serial]` (serial_test crate) — keep that attribute on any new test that opens a database, and clean up via `blockchain.shutdown_blockchain()` (developer_mode) — which only deletes when `DB_PATH` is unset, so do not set it in a test environment or the cleanup silently stops happening and stray `clutch-node-*.db` dirs accumulate.
-- CI: `.github/workflows/docker-build-push.yml` builds multi-arch images to GHCR + Docker Hub on push to main / `v*` tags, then repository-dispatches `deploy-stage` to clutch-deploy. There is **no CI job running `cargo test`** — run tests locally before pushing.
+- CI: `.github/workflows/docker-build-push.yml` builds multi-arch images to GHCR (Docker Hub publishing dropped 2026-09-18 — nothing deployed ever read from it) on push to main / `v*` tags, then repository-dispatches `deploy-stage` to clutch-deploy. There is **no CI job running `cargo test`** — run tests locally before pushing.
 
 ## Gotchas / Conventions
 
