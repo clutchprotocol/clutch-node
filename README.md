@@ -31,7 +31,7 @@ Clutch Node is the blockchain core for Clutch Protocol — Aura consensus, custo
 
 `get_chain_info` reports the genesis parameters a chain actually committed, plus supply and sync state. It is the only way to read those values from outside the node -- the config file on disk is what a node was *told*, not what its chain carries.
 
-Apps typically use [clutch-hub-api](https://github.com/clutchprotocol/clutch-hub-api) instead of calling the node directly.
+Apps typically use the [Hub API](https://github.com/clutchprotocol/clutch-hub/tree/main/services/hub-api) instead of calling the node directly.
 
 ## Features
 - **Decentralized System**: Eliminates intermediaries, allowing users to connect directly.
