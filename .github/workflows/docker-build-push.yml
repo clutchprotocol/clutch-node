@@ -178,12 +178,21 @@ jobs:
             exit 1
           fi
 
+      # clutch-deploy pins every image to an exact tag and deploys only what is pinned, so the
+      # dispatch names the tag this run pushed: metadata-action's type=sha, sha-<first 7 of the
+      # commit>. clutch-deploy checks that ghcr.io has it and pins it for STAGE only. The mainnet
+      # validators keep their own pin, which moves only in a planned upgrade.
+      - name: Name the tag this run pushed
+        id: tag
+        run: echo "sha=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
       - name: Trigger deploy-stage in clutch-deploy
         uses: peter-evans/repository-dispatch@v3
         with:
           token: ${{ secrets.CLUTCH_DEPLOY_DISPATCH_TOKEN }}
           repository: clutchprotocol/clutch-deploy
           event-type: deploy-stage
+          client-payload: '{"set_images": "clutch-node=${{ steps.tag.outputs.sha }}"}'
 
       - name: What this proves, and what it does not
         run: |
