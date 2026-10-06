@@ -109,20 +109,58 @@ impl Transaction {
         self.signature_v = v;
     }
 
+    /// The text a wallet signs for this transaction with `personal_sign`: readable in the wallet's
+    /// prompt, and tied to one chain. The hash is written the way `verify_hash` compares it, with
+    /// no `0x` and in lower case, so a wallet and the node always build the same text.
+    pub fn wallet_signing_text(&self) -> String {
+        let hash = self.hash.strip_prefix("0x").unwrap_or(&self.hash).to_lowercase();
+        format!("clutch-tx:{}:{}", self.chain_id, hash)
+    }
+
+    /// Sign the way a wallet does: `personal_sign` over `wallet_signing_text`. For tests and tools;
+    /// real wallets sign in the browser.
+    #[allow(dead_code)]
+    pub fn sign_personal(&mut self, secret_key: &str) {
+        let bytes = SignatureKeys::personal_sign_bytes(self.wallet_signing_text().as_bytes());
+        let (r, s, v) = SignatureKeys::sign(secret_key, &bytes);
+
+        self.signature_r = r;
+        self.signature_s = s;
+        self.signature_v = v;
+    }
+
+    /// Two signatures are accepted, and each one is checked against a different digest, so one
+    /// cannot pass for the other:
+    ///
+    /// 1. the key signed the hash string itself (the SDK's own key, the treasury's mint authority,
+    ///    the faucet);
+    /// 2. a wallet signed `wallet_signing_text` with `personal_sign` (EIP-191). MetaMask and Trust
+    ///    Wallet will not sign a bare hash, and they will sign this. `verify_hash` runs first and
+    ///    ties `hash` to `chain_id`, and the text names the chain, so the signature cannot move.
     fn verify_signature(&self) -> Result<(), String> {
         let from_address = &self.from;
-        let data = self.hash.as_bytes();
         let r = &self.signature_r;
         let s = &self.signature_s;
         let v = self.signature_v;
 
-        match SignatureKeys::verify(from_address, data, r, s, v) {
-            Ok(true) => Ok(()),
-            Ok(false) => Err(
+        let direct = SignatureKeys::verify(from_address, self.hash.as_bytes(), r, s, v);
+        if let Ok(true) = direct {
+            return Ok(());
+        }
+
+        let wallet_bytes = SignatureKeys::personal_sign_bytes(self.wallet_signing_text().as_bytes());
+        if let Ok(true) = SignatureKeys::verify(from_address, &wallet_bytes, r, s, v) {
+            return Ok(());
+        }
+
+        // Neither matched. A malformed signature keeps its own error; a well-formed one from the
+        // wrong key is a mismatch.
+        match direct {
+            Err(e) => Err(e),
+            Ok(_) => Err(
                 "Verification failed: transaction signature does not match the from address"
                     .to_string(),
             ),
-            Err(e) => Err(e),
         }
     }
 
@@ -861,5 +899,142 @@ mod tests {
             "node rejected an SDK RideOffer carrying the Hub-API-injected referrer: {:?}",
             tx.verify_hash()
         );
+    }
+
+    // --- Signatures: the hash string (SDK key) or a wallet's `personal_sign` ---
+
+    /// The committed dev key used across the repo, and its address.
+    const DEV_SK: &str = "d2c446110cfcecbdf05b2be528e72483de5b6f7ef9c7856df2f81f48e9f2748f";
+    const DEV_FROM: &str = "0xdeb4cfb63db134698e1879ea24904df074726cc0";
+
+    /// What a wallet signs, written out here on purpose instead of calling `wallet_signing_text`,
+    /// so these tests pin the format that the SDK and the wallets must produce.
+    fn wallet_signed(tx: &mut Transaction, secret: &str, text: &str) {
+        let bytes = SignatureKeys::personal_sign_bytes(text.as_bytes());
+        let (r, s, v) = SignatureKeys::sign(secret, &bytes);
+        tx.signature_r = r;
+        tx.signature_s = s;
+        tx.signature_v = v;
+    }
+
+    fn bare_hash(tx: &Transaction) -> String {
+        tx.hash.trim_start_matches("0x").to_string()
+    }
+
+    #[test]
+    fn wallet_signing_text_names_the_chain_and_the_bare_hash() {
+        let tx = tf(DEV_FROM, 1, "0xB");
+        let bare = bare_hash(&tx);
+        assert_eq!(bare.len(), 64);
+        assert_eq!(tx.wallet_signing_text(), format!("clutch-tx:2077:{}", bare));
+
+        // A hash that reached the node in upper case, with a prefix, gives the same text.
+        let mut wire = tx.clone();
+        wire.hash = format!("0x{}", bare.to_uppercase());
+        assert_eq!(wire.wallet_signing_text(), tx.wallet_signing_text());
+    }
+
+    #[test]
+    fn verify_signature_accepts_a_wallet_signature() {
+        let mut tx = tf(DEV_FROM, 1, "0xB");
+        let text = format!("clutch-tx:2077:{}", bare_hash(&tx));
+        wallet_signed(&mut tx, DEV_SK, &text);
+        assert_eq!(tx.verify_signature(), Ok(()));
+    }
+
+    #[test]
+    fn verify_signature_accepts_the_sign_personal_helper() {
+        let mut tx = tf(DEV_FROM, 1, "0xB");
+        tx.sign_personal(DEV_SK);
+        assert_eq!(tx.verify_signature(), Ok(()));
+    }
+
+    #[test]
+    fn verify_signature_still_accepts_a_signature_over_the_hash_string() {
+        // Node-built hash, with the 0x prefix (the treasury and the faucet sign this way).
+        let mut tx = tf(DEV_FROM, 1, "0xB");
+        tx.sign(DEV_SK);
+        assert_eq!(tx.verify_signature(), Ok(()));
+
+        // Wire hash, with no prefix (the SDK signs this way).
+        let mut wire = tf(DEV_FROM, 2, "0xB");
+        wire.hash = bare_hash(&wire);
+        wire.sign(DEV_SK);
+        assert_eq!(wire.verify_signature(), Ok(()));
+    }
+
+    #[test]
+    fn verify_signature_accepts_the_signature_a_javascript_library_made() {
+        // The text and the signature come from @noble/secp256k1 over `personal_sign`, as the SDK's
+        // wallet signer will produce them. The Transaction is built by hand: `verify_signature`
+        // reads only `from`, `chain_id`, `hash` and the signature.
+        let mut tx = tf(DEV_FROM, 1, "0xB");
+        tx.chain_id = 1000;
+        tx.hash = "6f1e0b5d3a9c4e7f8a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f".to_string();
+        tx.signature_r = "03a910ef2c3144e635a9cd5dfb87d0f0a8e9cde11013b5fdbbd3098eb66ede07".to_string();
+        tx.signature_s = "7270323fea8d69ffeedac84df538c026d630e027b4380686287350fcb8e03c91".to_string();
+        tx.signature_v = 28;
+        assert_eq!(
+            tx.wallet_signing_text(),
+            "clutch-tx:1000:6f1e0b5d3a9c4e7f8a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f"
+        );
+        assert_eq!(tx.verify_signature(), Ok(()));
+
+        // The same signature is for that hash on that chain only.
+        let mut other_chain = tx.clone();
+        other_chain.chain_id = 2077;
+        assert!(other_chain.verify_signature().is_err());
+    }
+
+    #[test]
+    fn verify_signature_rejects_a_wallet_signature_for_another_chain() {
+        let mut tx = tf(DEV_FROM, 1, "0xB");
+        // Signed for chain 1; the transaction (and its hash) is for chain 2077.
+        let text = format!("clutch-tx:1:{}", bare_hash(&tx));
+        wallet_signed(&mut tx, DEV_SK, &text);
+        let err = tx.verify_signature().unwrap_err();
+        assert!(err.contains("does not match the from address"), "got: {}", err);
+    }
+
+    #[test]
+    fn verify_signature_rejects_a_wallet_signature_from_another_key() {
+        let mut tx = tf(DEV_FROM, 1, "0xB");
+        let intruder = SignatureKeys::generate_new_keypair();
+        let text = format!("clutch-tx:2077:{}", bare_hash(&tx));
+        wallet_signed(&mut tx, &intruder.secret_key, &text);
+        let err = tx.verify_signature().unwrap_err();
+        assert!(err.contains("does not match the from address"), "got: {}", err);
+    }
+
+    #[test]
+    fn verify_signature_rejects_a_wallet_signature_for_another_transaction() {
+        let mut approved = tf(DEV_FROM, 1, "0xB");
+        approved.sign_personal(DEV_SK);
+
+        // Same sender, nonce and chain, but a different recipient: a different hash.
+        let mut other = tf(DEV_FROM, 1, "0xC");
+        assert_ne!(other.hash, approved.hash);
+        other.signature_r = approved.signature_r.clone();
+        other.signature_s = approved.signature_s.clone();
+        other.signature_v = approved.signature_v;
+        assert!(other.verify_signature().is_err());
+    }
+
+    #[test]
+    fn verify_signature_rejects_a_flipped_recovery_id() {
+        let mut tx = tf(DEV_FROM, 1, "0xB");
+        tx.sign_personal(DEV_SK);
+        tx.signature_v = if tx.signature_v == 27 { 28 } else { 27 };
+        assert!(tx.verify_signature().is_err());
+    }
+
+    #[test]
+    fn verify_signature_keeps_the_error_for_a_malformed_signature() {
+        let mut tx = tf(DEV_FROM, 1, "0xB");
+        tx.signature_r = "zz".to_string();
+        tx.signature_s = "zz".to_string();
+        tx.signature_v = 27;
+        let err = tx.verify_signature().unwrap_err();
+        assert!(err.contains("Invalid hex in r"), "got: {}", err);
     }
 }
