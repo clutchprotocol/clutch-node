@@ -11,7 +11,6 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, Semaphore};
 use tokio_tungstenite::accept_async_with_config;
 use tokio_tungstenite::tungstenite::protocol::{Message, WebSocketConfig};
-use hex;
 
 // Bound per-connection message size and total concurrent connections so an
 // unauthenticated peer can't exhaust memory or tasks (default frame cap is 64 MiB).
@@ -172,20 +171,7 @@ impl WebSocket {
             }
         };
 
-        let blockchain = blockchain.lock().await;
-        if let Err(e) = blockchain.add_transaction_to_pool(&transaction) {
-            let error_msg = format!("Failed to add transaction: {}", e);
-            error!("{}", error_msg);
-            return Some(json_rpc_error_response(-32000, &error_msg, id));
-        }
-
-        info!("Transaction added to pool from WebSocket.");
-
-        // Gossip transaction
-        let encoded_tx = encode(&transaction);
-        P2PServer::gossip_message_command(command_tx_p2p, GossipMessageType::Transaction, &encoded_tx).await;
-
-        Some(json_rpc_success_response(serde_json::json!("Transaction imported"), id))
+        Self::submit_transaction(transaction, id, blockchain, command_tx_p2p).await
     }
 
     async fn handle_send_raw_transaction(
@@ -220,16 +206,28 @@ impl WebSocket {
                 return Some(json_rpc_error_response(-32602, &error_msg, id));
             }
         };
+        Self::submit_transaction(transaction, id, blockchain, command_tx_p2p).await
+    }
+
+    /// Pool a decoded transaction and gossip it: the shared tail of both submit methods.
+    async fn submit_transaction(
+        transaction: Transaction,
+        id: serde_json::Value,
+        blockchain: &Arc<Mutex<Blockchain>>,
+        command_tx_p2p: tokio::sync::mpsc::Sender<P2PServerCommand>,
+    ) -> Option<String> {
         let blockchain = blockchain.lock().await;
         if let Err(e) = blockchain.add_transaction_to_pool(&transaction) {
             let error_msg = format!("Failed to add transaction: {}", e);
             error!("{}", error_msg);
             return Some(json_rpc_error_response(-32000, &error_msg, id));
         }
+
         info!("Transaction added to pool from WebSocket.");
-        // Gossip transaction
+
         let encoded_tx = encode(&transaction);
         P2PServer::gossip_message_command(command_tx_p2p, GossipMessageType::Transaction, &encoded_tx).await;
+
         Some(json_rpc_success_response(serde_json::json!("Transaction imported"), id))
     }
 
@@ -387,7 +385,7 @@ impl WebSocket {
 
                         if let Some(txs) = obj.get_mut("transactions").and_then(|v| v.as_array_mut())
                         {
-                            for (idx, tx_val) in txs.iter_mut().enumerate() {
+                            for tx_val in txs.iter_mut() {
                                 if let Some(tx_obj) = tx_val.as_object_mut() {
                                     let tx_hash = tx_obj
                                         .get("hash")
@@ -404,7 +402,6 @@ impl WebSocket {
                                             );
                                         }
                                     }
-                                    let _ = idx;
                                 }
                             }
                         }
@@ -477,17 +474,7 @@ impl WebSocket {
         };
 
         let blockchain = blockchain.lock().await;
-        match blockchain.list_available_ride_requests(bounds) {
-            Ok(requests) => {
-                let result = serde_json::to_value(requests).unwrap_or(serde_json::Value::Array(vec![]));
-                Some(json_rpc_success_response(result, id))
-            }
-            Err(e) => {
-                let error_msg = format!("Failed to list ride requests: {}", e);
-                error!("{}", error_msg);
-                Some(json_rpc_error_response(-32000, &error_msg, id))
-            }
-        }
+        list_response(blockchain.list_available_ride_requests(bounds), "ride requests", id)
     }
 
     async fn handle_list_ride_offers(
@@ -516,17 +503,8 @@ impl WebSocket {
         let ride_request_tx_hash = parsed_params.and_then(|p| p.ride_request_tx_hash);
 
         let blockchain = blockchain.lock().await;
-        match blockchain.list_ride_offers_for_request(ride_request_tx_hash.as_deref()) {
-            Ok(offers) => {
-                let result = serde_json::to_value(offers).unwrap_or(serde_json::Value::Array(vec![]));
-                Some(json_rpc_success_response(result, id))
-            }
-            Err(e) => {
-                let error_msg = format!("Failed to list ride offers: {}", e);
-                error!("{}", error_msg);
-                Some(json_rpc_error_response(-32000, &error_msg, id))
-            }
-        }
+        let offers = blockchain.list_ride_offers_for_request(ride_request_tx_hash.as_deref());
+        list_response(offers, "ride offers", id)
     }
 
     async fn handle_list_active_trips(
@@ -534,39 +512,10 @@ impl WebSocket {
         id: serde_json::Value,
         blockchain: &Arc<Mutex<Blockchain>>,
     ) -> Option<String> {
-        #[derive(serde::Deserialize)]
-        struct ListActiveTripsParams {
-            driver_address: Option<String>,
-            passenger_address: Option<String>,
-        }
-
-        let parsed: ListActiveTripsParams = if params.is_object() {
-            serde_json::from_value(params).unwrap_or(ListActiveTripsParams {
-                driver_address: None,
-                passenger_address: None,
-            })
-        } else {
-            ListActiveTripsParams {
-                driver_address: None,
-                passenger_address: None,
-            }
-        };
-
+        let filter = TripFilter::from_params(params);
         let blockchain = blockchain.lock().await;
-        match blockchain.list_active_trips(
-            parsed.driver_address.as_deref(),
-            parsed.passenger_address.as_deref(),
-        ) {
-            Ok(trips) => {
-                let result = serde_json::to_value(trips).unwrap_or(serde_json::Value::Array(vec![]));
-                Some(json_rpc_success_response(result, id))
-            }
-            Err(e) => {
-                let error_msg = format!("Failed to list active trips: {}", e);
-                error!("{}", error_msg);
-                Some(json_rpc_error_response(-32000, &error_msg, id))
-            }
-        }
+        let trips = blockchain.list_active_trips(filter.driver(), filter.passenger());
+        list_response(trips, "active trips", id)
     }
 
     async fn handle_list_completed_trips(
@@ -574,39 +523,10 @@ impl WebSocket {
         id: serde_json::Value,
         blockchain: &Arc<Mutex<Blockchain>>,
     ) -> Option<String> {
-        #[derive(serde::Deserialize)]
-        struct ListCompletedTripsParams {
-            driver_address: Option<String>,
-            passenger_address: Option<String>,
-        }
-
-        let parsed: ListCompletedTripsParams = if params.is_object() {
-            serde_json::from_value(params).unwrap_or(ListCompletedTripsParams {
-                driver_address: None,
-                passenger_address: None,
-            })
-        } else {
-            ListCompletedTripsParams {
-                driver_address: None,
-                passenger_address: None,
-            }
-        };
-
+        let filter = TripFilter::from_params(params);
         let blockchain = blockchain.lock().await;
-        match blockchain.list_completed_trips(
-            parsed.driver_address.as_deref(),
-            parsed.passenger_address.as_deref(),
-        ) {
-            Ok(trips) => {
-                let result = serde_json::to_value(trips).unwrap_or(serde_json::Value::Array(vec![]));
-                Some(json_rpc_success_response(result, id))
-            }
-            Err(e) => {
-                let error_msg = format!("Failed to list completed trips: {}", e);
-                error!("{}", error_msg);
-                Some(json_rpc_error_response(-32000, &error_msg, id))
-            }
-        }
+        let trips = blockchain.list_completed_trips(filter.driver(), filter.passenger());
+        list_response(trips, "completed trips", id)
     }
 
     async fn handle_list_recent_trips(
@@ -614,38 +534,54 @@ impl WebSocket {
         id: serde_json::Value,
         blockchain: &Arc<Mutex<Blockchain>>,
     ) -> Option<String> {
-        #[derive(serde::Deserialize)]
-        struct ListRecentTripsParams {
-            driver_address: Option<String>,
-            passenger_address: Option<String>,
-        }
-
-        let parsed: ListRecentTripsParams = if params.is_object() {
-            serde_json::from_value(params).unwrap_or(ListRecentTripsParams {
-                driver_address: None,
-                passenger_address: None,
-            })
-        } else {
-            ListRecentTripsParams {
-                driver_address: None,
-                passenger_address: None,
-            }
-        };
-
+        let filter = TripFilter::from_params(params);
         let blockchain = blockchain.lock().await;
-        match blockchain.list_recent_trips(
-            parsed.driver_address.as_deref(),
-            parsed.passenger_address.as_deref(),
-        ) {
-            Ok(trips) => {
-                let result = serde_json::to_value(trips).unwrap_or(serde_json::Value::Array(vec![]));
-                Some(json_rpc_success_response(result, id))
-            }
-            Err(e) => {
-                let error_msg = format!("Failed to list recent trips: {}", e);
-                error!("{}", error_msg);
-                Some(json_rpc_error_response(-32000, &error_msg, id))
-            }
+        let trips = blockchain.list_recent_trips(filter.driver(), filter.passenger());
+        list_response(trips, "recent trips", id)
+    }
+}
+
+/// Optional driver/passenger filter shared by the three trip lists. Anything that does not parse
+/// as one is treated as no filter, as it always has been.
+#[derive(serde::Deserialize, Default)]
+struct TripFilter {
+    driver_address: Option<String>,
+    passenger_address: Option<String>,
+}
+
+impl TripFilter {
+    fn from_params(params: serde_json::Value) -> Self {
+        if params.is_object() {
+            serde_json::from_value(params).unwrap_or_default()
+        } else {
+            Self::default()
+        }
+    }
+
+    fn driver(&self) -> Option<&str> {
+        self.driver_address.as_deref()
+    }
+
+    fn passenger(&self) -> Option<&str> {
+        self.passenger_address.as_deref()
+    }
+}
+
+/// The response for a `list_*` method: the items as a JSON array, or a -32000 naming what failed.
+fn list_response<T: serde::Serialize>(
+    items: Result<Vec<T>, String>,
+    what: &str,
+    id: serde_json::Value,
+) -> Option<String> {
+    match items {
+        Ok(items) => {
+            let result = serde_json::to_value(items).unwrap_or(serde_json::Value::Array(vec![]));
+            Some(json_rpc_success_response(result, id))
+        }
+        Err(e) => {
+            let error_msg = format!("Failed to list {}: {}", what, e);
+            error!("{}", error_msg);
+            Some(json_rpc_error_response(-32000, &error_msg, id))
         }
     }
 }

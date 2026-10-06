@@ -15,11 +15,10 @@
  */
 
 use clap::Parser;
-mod node;
-use node::blockchain::Blockchain;
-use node::configuration::AppConfig;
-use node::tracing::setup_tracing;
-use node::transactions::chain_init::ChainInit;
+use clutch_node::node::blockchain::Blockchain;
+use clutch_node::node::configuration::AppConfig;
+use clutch_node::node::tracing::setup_tracing;
+use clutch_node::node::transactions::chain_init::ChainInit;
 
 #[derive(Parser, Debug)]
 #[clap(author, version, about, long_about = None)]

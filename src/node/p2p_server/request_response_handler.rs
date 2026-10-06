@@ -130,10 +130,10 @@ async fn handle_response_message(
             handle_handshake_response(payload, &peer_id, swarm, blockchain).await
         }
         Some(DirectMessageType::BlockHeaders) => {
-            handle_block_headers_response(payload, &peer_id, swarm, blockchain).await
+            handle_block_headers_response(payload, &peer_id, swarm)
         }
         Some(DirectMessageType::BlockBodies) => {
-            handle_block_bodies_response(payload, &peer_id, swarm, blockchain).await
+            handle_block_bodies_response(payload, blockchain).await
         }
         _ => {
             error!(
@@ -282,12 +282,7 @@ async fn handle_handshake_response(
     }
 }
 
-async fn handle_block_headers_response(
-    payload: &[u8],
-    peer_id: &PeerId,
-    swarm: &mut Swarm<P2PBehaviour>,
-    _blockchain: &Arc<Mutex<Blockchain>>,
-) {
+fn handle_block_headers_response(payload: &[u8], peer_id: &PeerId, swarm: &mut Swarm<P2PBehaviour>) {
     match decode::<BlockHeaders>(payload) {
         Ok(block_headers) => {
             debug!("Decoded BlockHeaders: {:?}", block_headers);
@@ -305,12 +300,7 @@ async fn handle_block_headers_response(
     }
 }
 
-async fn handle_block_bodies_response(
-    payload: &[u8],
-    _peer_id: &PeerId,
-    _swarm: &mut Swarm<P2PBehaviour>,
-    blockchain: &Arc<Mutex<Blockchain>>,
-) {
+async fn handle_block_bodies_response(payload: &[u8], blockchain: &Arc<Mutex<Blockchain>>) {
     match decode::<BlockBodies>(payload) {
         Ok(block_bodies) => {
             debug!("Decoded BlockBodies: {:?}", block_bodies);

@@ -101,28 +101,6 @@ impl Database {
         Ok(())
     }
 
-    #[allow(dead_code)]
-    pub fn get_keys_by_cf_name(&self, cf_name: &str) -> Result<Vec<Vec<u8>>, String> {
-        match &self.db {
-            Some(db) => {
-                let cf_handle = db
-                    .cf_handle(cf_name)
-                    .ok_or(format!("Column family '{}' not found", cf_name))?;
-                let mut keys = Vec::new();
-                let iter = db.prefix_iterator_cf(cf_handle, ""); // Using prefix_iterator_cf with empty prefix to get all keys
-
-                for item in iter {
-                    match item {
-                        Ok((key, _)) => keys.push(key.to_vec()), // Collect keys, ignore values
-                        Err(e) => return Err(e.to_string()),
-                    }
-                }
-                Ok(keys)
-            }
-            None => Err("Database connection is closed".to_string()),
-        }
-    }
-
     pub fn get_keys_values_by_cf_name(
         &self,
         cf_name: &str,

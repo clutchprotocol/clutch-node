@@ -85,7 +85,6 @@ impl P2PServer {
         }
     }
 
-    #[allow(dead_code)]
     pub async fn send_direct_message_command(
         command_tx_p2p: Sender<P2PServerCommand>,
         peer_id: PeerId,
@@ -116,7 +115,6 @@ impl P2PServer {
         }
     }
 
-    #[allow(dead_code)]
     pub async fn get_local_peer_id_command(command_tx_p2p: Sender<P2PServerCommand>) -> PeerId {
         let (response_tx, response_rx) = oneshot::channel();
 
@@ -128,7 +126,6 @@ impl P2PServer {
         response_rx.await.unwrap()
     }
 
-    #[allow(dead_code)]
     pub async fn get_connected_peers_command(
         command_tx_p2p: Sender<P2PServerCommand>,
     ) -> Result<HashSet<PeerId>, Box<dyn StdError>> {

@@ -7,7 +7,7 @@ Rust node implementing Aura (Proof-of-Authority) consensus, custom RLP-encoded t
 | Path | Purpose |
 |------|---------|
 | `src/main.rs` | Entry: clap `--env <name>` → `AppConfig::load_configuration` → `setup_tracing` → `Blockchain::new` → `start_network_services` |
-| `src/lib.rs` | Exposes `pub mod node` so integration tests can `use clutch_node::node::...` |
+| `src/lib.rs` | Exposes `pub mod node`; the binary and the integration tests both `use clutch_node::node::...`, so the module tree is compiled once (`main.rs` must not declare `mod node` again) |
 | `src/node/blockchain.rs` | Central facade: owns `Database` + `Aura`; `import_block`, `author_new_block`, `add_transaction_to_pool`, all `list_*` queries |
 | `src/node/node_services.rs` | Spawns the tokio tasks: libp2p server, WebSocket server, 1s block-authoring loop, initial peer sync; Ctrl+C shutdown |
 | `src/node/aura.rs`, `consensus.rs` | Aura impl of the `Consensus` trait: `slot = timestamp / step_duration`, author = `authorities[slot % len]`; `step_duration = 60 / authorities.len()` |

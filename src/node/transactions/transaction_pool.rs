@@ -12,7 +12,6 @@ impl TransactionPool {
         db.put("tx_pool", &key, &value)
     }
 
-    #[allow(dead_code)]
     pub fn remove_transaction(db: &Database, tx_hash: &str) -> Result<(), String> {
         let key = Self::construct_tx_pool_key(tx_hash);
         match db.delete("tx_pool", &key) {
