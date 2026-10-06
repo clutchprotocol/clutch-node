@@ -129,14 +129,28 @@ impl Transaction {
         self.signature_v = v;
     }
 
-    /// Two signatures are accepted, and each one is checked against a different digest, so one
-    /// cannot pass for the other:
+    /// Sign the way TronLink does: TIP-191 `signMessageV2` over `wallet_signing_text`. For tests
+    /// and tools; real wallets sign in the browser.
+    #[allow(dead_code)]
+    pub fn sign_tron(&mut self, secret_key: &str) {
+        let bytes = SignatureKeys::tron_sign_bytes(self.wallet_signing_text().as_bytes());
+        let (r, s, v) = SignatureKeys::sign(secret_key, &bytes);
+
+        self.signature_r = r;
+        self.signature_s = s;
+        self.signature_v = v;
+    }
+
+    /// Three signatures are accepted, and each one is checked against a different digest, so one
+    /// cannot pass for another:
     ///
     /// 1. the key signed the hash string itself (the SDK's own key, the treasury's mint authority,
     ///    the faucet);
     /// 2. a wallet signed `wallet_signing_text` with `personal_sign` (EIP-191). MetaMask and Trust
     ///    Wallet will not sign a bare hash, and they will sign this. `verify_hash` runs first and
-    ///    ties `hash` to `chain_id`, and the text names the chain, so the signature cannot move.
+    ///    ties `hash` to `chain_id`, and the text names the chain, so the signature cannot move;
+    /// 3. TronLink signed the same text with TIP-191 `signMessageV2`: the same key and the same
+    ///    address, with the prefix `\x19TRON Signed Message:\n` in place of the Ethereum one.
     fn verify_signature(&self) -> Result<(), String> {
         let from_address = &self.from;
         let r = &self.signature_r;
@@ -148,12 +162,18 @@ impl Transaction {
             return Ok(());
         }
 
-        let wallet_bytes = SignatureKeys::personal_sign_bytes(self.wallet_signing_text().as_bytes());
+        let text = self.wallet_signing_text();
+        let wallet_bytes = SignatureKeys::personal_sign_bytes(text.as_bytes());
         if let Ok(true) = SignatureKeys::verify(from_address, &wallet_bytes, r, s, v) {
             return Ok(());
         }
 
-        // Neither matched. A malformed signature keeps its own error; a well-formed one from the
+        let tron_bytes = SignatureKeys::tron_sign_bytes(text.as_bytes());
+        if let Ok(true) = SignatureKeys::verify(from_address, &tron_bytes, r, s, v) {
+            return Ok(());
+        }
+
+        // None matched. A malformed signature keeps its own error; a well-formed one from the
         // wrong key is a mismatch.
         match direct {
             Err(e) => Err(e),
@@ -1036,5 +1056,111 @@ mod tests {
         tx.signature_v = 27;
         let err = tx.verify_signature().unwrap_err();
         assert!(err.contains("Invalid hex in r"), "got: {}", err);
+    }
+
+    // --- TronLink: TIP-191 `signMessageV2`, the same text with the TRON prefix ---
+
+    /// What TronLink signs, written out here on purpose instead of calling `wallet_signing_text`.
+    fn tron_signed(tx: &mut Transaction, secret: &str, text: &str) {
+        let bytes = SignatureKeys::tron_sign_bytes(text.as_bytes());
+        let (r, s, v) = SignatureKeys::sign(secret, &bytes);
+        tx.signature_r = r;
+        tx.signature_s = s;
+        tx.signature_v = v;
+    }
+
+    #[test]
+    fn verify_signature_accepts_a_tronlink_signature() {
+        let mut tx = tf(DEV_FROM, 1, "0xB");
+        let text = format!("clutch-tx:2077:{}", bare_hash(&tx));
+        tron_signed(&mut tx, DEV_SK, &text);
+        assert_eq!(tx.verify_signature(), Ok(()));
+    }
+
+    #[test]
+    fn verify_signature_accepts_the_sign_tron_helper() {
+        let mut tx = tf(DEV_FROM, 1, "0xB");
+        tx.sign_tron(DEV_SK);
+        assert_eq!(tx.verify_signature(), Ok(()));
+    }
+
+    #[test]
+    fn verify_signature_accepts_the_signature_tronweb_made() {
+        // The signature comes from TronWeb 6.5.1 (`trx.signMessageV2`), the library TronLink wraps.
+        // The Transaction is built by hand: `verify_signature` reads only `from`, `chain_id`,
+        // `hash` and the signature.
+        let mut tx = tf(DEV_FROM, 1, "0xB");
+        tx.chain_id = 1000;
+        tx.hash = "6f1e0b5d3a9c4e7f8a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f".to_string();
+        tx.signature_r = "7f43dd8cb6b4ef174aa0da23faee41757521efcccd9a588052457f397e067494".to_string();
+        tx.signature_s = "41afed3dd9a654e351b37ebaccad69a3f94b07926d19896a67b5621517f1063d".to_string();
+        tx.signature_v = 27;
+        assert_eq!(
+            tx.wallet_signing_text(),
+            "clutch-tx:1000:6f1e0b5d3a9c4e7f8a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f"
+        );
+        assert_eq!(tx.verify_signature(), Ok(()));
+
+        // The same signature is for that hash on that chain only.
+        let mut other_chain = tx.clone();
+        other_chain.chain_id = 2077;
+        assert!(other_chain.verify_signature().is_err());
+    }
+
+    #[test]
+    fn verify_signature_rejects_a_tronlink_signature_for_another_chain() {
+        let mut tx = tf(DEV_FROM, 1, "0xB");
+        // Signed for chain 1; the transaction (and its hash) is for chain 2077.
+        let text = format!("clutch-tx:1:{}", bare_hash(&tx));
+        tron_signed(&mut tx, DEV_SK, &text);
+        let err = tx.verify_signature().unwrap_err();
+        assert!(err.contains("does not match the from address"), "got: {}", err);
+    }
+
+    #[test]
+    fn verify_signature_rejects_a_tronlink_signature_from_another_key() {
+        let mut tx = tf(DEV_FROM, 1, "0xB");
+        let intruder = SignatureKeys::generate_new_keypair();
+        let text = format!("clutch-tx:2077:{}", bare_hash(&tx));
+        tron_signed(&mut tx, &intruder.secret_key, &text);
+        let err = tx.verify_signature().unwrap_err();
+        assert!(err.contains("does not match the from address"), "got: {}", err);
+    }
+
+    #[test]
+    fn verify_signature_rejects_a_tronlink_signature_for_another_transaction() {
+        let mut approved = tf(DEV_FROM, 1, "0xB");
+        approved.sign_tron(DEV_SK);
+
+        // Same sender, nonce and chain, but a different recipient: a different hash.
+        let mut other = tf(DEV_FROM, 1, "0xC");
+        assert_ne!(other.hash, approved.hash);
+        other.signature_r = approved.signature_r.clone();
+        other.signature_s = approved.signature_s.clone();
+        other.signature_v = approved.signature_v;
+        assert!(other.verify_signature().is_err());
+    }
+
+    #[test]
+    fn verify_signature_accepts_each_prefix_and_no_other() {
+        // Both wallet prefixes are accepted for the same text, each with its own signature.
+        let mut eth = tf(DEV_FROM, 1, "0xB");
+        eth.sign_personal(DEV_SK);
+        assert_eq!(eth.verify_signature(), Ok(()));
+        let mut tron = tf(DEV_FROM, 1, "0xB");
+        tron.sign_tron(DEV_SK);
+        assert_eq!(tron.verify_signature(), Ok(()));
+        assert_ne!(eth.signature_r, tron.signature_r);
+
+        // A prefix the node does not know is refused, whoever signs it.
+        let mut other = tf(DEV_FROM, 1, "0xB");
+        let text = other.wallet_signing_text();
+        let bytes = format!("\x19Bitcoin Signed Message:\n{}{}", text.len(), text).into_bytes();
+        let (r, s, v) = SignatureKeys::sign(DEV_SK, &bytes);
+        other.signature_r = r;
+        other.signature_s = s;
+        other.signature_v = v;
+        let err = other.verify_signature().unwrap_err();
+        assert!(err.contains("does not match the from address"), "got: {}", err);
     }
 }

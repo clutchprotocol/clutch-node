@@ -56,6 +56,18 @@ impl SignatureKeys {
         bytes
     }
 
+    /// The bytes TronLink's `signMessageV2` (TIP-191, the TRON twin of EIP-191) puts through
+    /// Keccak-256: `"\x19TRON Signed Message:\n"`, the message length in decimal, then the message.
+    ///
+    /// A TRON account is an Ethereum-type key: the same curve, the same Keccak-256 and the same 20
+    /// address bytes (TRON writes them in base58 with a `0x41` prefix). Only this prefix differs
+    /// from `personal_sign_bytes`, so the two digests of one text never meet.
+    pub fn tron_sign_bytes(message: &[u8]) -> Vec<u8> {
+        let mut bytes = format!("\x19TRON Signed Message:\n{}", message.len()).into_bytes();
+        bytes.extend_from_slice(message);
+        bytes
+    }
+
     pub fn sign(secret_key: &str, data: &[u8]) -> (String, String, i32) {
         let secp = Secp256k1::new();
 
@@ -270,5 +282,52 @@ mod tests {
             SignatureKeys::verify(&keys.address_key, &other_chain, &r, &s, v),
             Ok(false)
         );
+    }
+
+    // TronLink signs with TIP-191 (`signMessageV2`): `personal_sign` with another prefix.
+
+    #[test]
+    fn tron_sign_bytes_has_the_tip191_layout() {
+        assert_eq!(
+            SignatureKeys::tron_sign_bytes(b"hello"),
+            b"\x19TRON Signed Message:\n5hello".to_vec()
+        );
+        // The length counts bytes, not characters: "é" is two bytes.
+        assert_eq!(
+            SignatureKeys::tron_sign_bytes("é".as_bytes()),
+            "\x19TRON Signed Message:\n2é".as_bytes().to_vec()
+        );
+        // The length is written in decimal, however many digits it needs.
+        let long = "x".repeat(123);
+        let mut expected = b"\x19TRON Signed Message:\n123".to_vec();
+        expected.extend_from_slice(long.as_bytes());
+        assert_eq!(SignatureKeys::tron_sign_bytes(long.as_bytes()), expected);
+    }
+
+    #[test]
+    fn the_tron_and_ethereum_digests_of_one_text_differ() {
+        let text = b"clutch-tx:1000:abcd";
+        assert_ne!(
+            Keccak256::digest(SignatureKeys::tron_sign_bytes(text)),
+            Keccak256::digest(SignatureKeys::personal_sign_bytes(text))
+        );
+    }
+
+    #[test]
+    fn a_signature_tronweb_made_verifies() {
+        // Made by TronWeb 6.5.1 itself (`trx.signMessageV2(text, devKey)`), the library TronLink
+        // wraps: not by this code, and not by the library the SDK uses.
+        let text = "clutch-tx:1000:6f1e0b5d3a9c4e7f8a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f";
+        let tron = SignatureKeys::tron_sign_bytes(text.as_bytes());
+        let r = "7f43dd8cb6b4ef174aa0da23faee41757521efcccd9a588052457f397e067494";
+        let s = "41afed3dd9a654e351b37ebaccad69a3f94b07926d19896a67b5621517f1063d";
+        assert_eq!(SignatureKeys::verify(DEV_ADDRESS, &tron, r, s, 27), Ok(true));
+        // It is a TRON-prefix signature only: not a personal_sign one, and not one over the bare text.
+        let eth = SignatureKeys::personal_sign_bytes(text.as_bytes());
+        assert_eq!(SignatureKeys::verify(DEV_ADDRESS, &eth, r, s, 27), Ok(false));
+        assert_eq!(SignatureKeys::verify(DEV_ADDRESS, text.as_bytes(), r, s, 27), Ok(false));
+        // And the key behind the vector is the one we think it is.
+        let (r2, s2, v2) = SignatureKeys::sign(DEV_SK, &tron);
+        assert_eq!(SignatureKeys::verify(DEV_ADDRESS, &tron, &r2, &s2, v2), Ok(true));
     }
 }

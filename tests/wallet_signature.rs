@@ -1,6 +1,7 @@
-//! A transaction signed by a wallet (`personal_sign`, EIP-191) goes through the whole node path:
-//! the pool, the authored block and its re-validation. Wallets such as MetaMask and Trust Wallet
-//! will not sign a bare hash, so this is the way their users reach the chain.
+//! A transaction signed by a wallet (`personal_sign`, EIP-191, or TronLink's `signMessageV2`,
+//! TIP-191) goes through the whole node path: the pool, the authored block and its re-validation.
+//! Wallets such as MetaMask, Trust Wallet and TronLink will not sign a bare hash, so this is the
+//! way their users reach the chain.
 //!
 //! The signing text is written out in full in these tests on purpose. They pin the format that the
 //! SDK and the wallets have to produce, and do not ask the node what it expects.
@@ -61,6 +62,15 @@ fn transfer(from: &str, nonce: u64, value: u64) -> Transaction {
 /// Sign `tx` as a wallet would, over `text`.
 fn wallet_sign(tx: &mut Transaction, secret: &str, text: &str) {
     let bytes = SignatureKeys::personal_sign_bytes(text.as_bytes());
+    let (r, s, v) = SignatureKeys::sign(secret, &bytes);
+    tx.signature_r = r;
+    tx.signature_s = s;
+    tx.signature_v = v;
+}
+
+/// Sign `tx` as TronLink would (TIP-191 `signMessageV2`), over `text`.
+fn tron_sign(tx: &mut Transaction, secret: &str, text: &str) {
+    let bytes = SignatureKeys::tron_sign_bytes(text.as_bytes());
     let (r, s, v) = SignatureKeys::sign(secret, &bytes);
     tx.signature_r = r;
     tx.signature_s = s;
@@ -142,5 +152,49 @@ fn a_wallet_signature_from_another_key_is_refused() {
 
     let err = chain.add_transaction_to_pool(&tx).unwrap_err();
     assert!(err.contains("does not match the from address"), "got: {}", err);
+    chain.shutdown_blockchain();
+}
+
+#[test]
+#[serial]
+fn a_tronlink_signed_transfer_is_accepted_and_applied() {
+    let mut chain = chain("test-tron-sig-transfer");
+    let wallet = SignatureKeys::generate_new_keypair();
+    fund(&chain, &wallet.address_key, 10_000);
+
+    let mut tx = transfer(&wallet.address_key, 1, 500);
+    let text = format!("clutch-tx:{}:{}", CHAIN_ID, tx.hash.trim_start_matches("0x"));
+    tron_sign(&mut tx, &wallet.secret_key, &text);
+
+    chain
+        .add_transaction_to_pool(&tx)
+        .unwrap_or_else(|e| panic!("pool refused a TronLink-signed transfer: {}", e));
+    let block = chain.author_new_block().expect("author_new_block");
+    assert_eq!(block.transactions.len(), 1, "the block must carry the TronLink transfer");
+
+    assert_eq!(
+        chain.get_account_balance(&wallet.address_key),
+        10_000 - 500 - TX_FEE,
+        "the wallet pays value + fee"
+    );
+    assert_eq!(chain.get_account_balance(&RECIPIENT.to_string()), 500);
+    chain.shutdown_blockchain();
+}
+
+#[test]
+#[serial]
+fn a_tronlink_signature_made_for_another_chain_is_refused() {
+    let mut chain = chain("test-tron-sig-other-chain");
+    let wallet = SignatureKeys::generate_new_keypair();
+    fund(&chain, &wallet.address_key, 10_000);
+
+    let mut tx = transfer(&wallet.address_key, 1, 500);
+    // TronLink was shown chain 1; this node runs chain 2077.
+    let text = format!("clutch-tx:1:{}", tx.hash.trim_start_matches("0x"));
+    tron_sign(&mut tx, &wallet.secret_key, &text);
+
+    let err = chain.add_transaction_to_pool(&tx).unwrap_err();
+    assert!(err.contains("does not match the from address"), "got: {}", err);
+    assert_eq!(chain.get_account_balance(&RECIPIENT.to_string()), 0);
     chain.shutdown_blockchain();
 }
