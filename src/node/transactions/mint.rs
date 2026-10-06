@@ -255,7 +255,7 @@ impl Decodable for Mint {
 #[cfg(test)]
 mod mofn_tests {
     use super::*;
-    use rlp::{Encodable as _, Rlp};
+    use rlp::Rlp;
 
     const SECRET_A: &str = "0101010101010101010101010101010101010101010101010101010101010101";
     const SECRET_B: &str = "0202020202020202020202020202020202020202020202020202020202020202";

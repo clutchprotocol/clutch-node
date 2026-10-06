@@ -49,9 +49,7 @@ tracing = "0.1.40"
 tracing-subscriber = { version = "0.3.18", features = ["env-filter"] }
 clap = { version = "4.5.17", features = ["derive"] }
 tokio-tungstenite = "0.23.1"
-tungstenite = "0.24.0"
 rlp = "0.5.2"
-async-trait = "0.1.81"
 prometheus-client = "0.22.3"
 axum = "0.7.5"
 lazy_static = "1.5.0"

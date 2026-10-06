@@ -2,13 +2,12 @@ use crate::node::{
     account_state::AccountState,
     balance_effect::{BalanceEffectKind, StateUpdate},
     database::Database,
-    signature_keys::{self, SignatureKeys},
+    signature_keys::SignatureKeys,
 };
 
 use rlp::RlpStream;
 use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
-use std::vec;
 
 use super::chain_init::ChainInit;
 use super::{function_call::FunctionCall, passenger_concurrent};
@@ -99,11 +98,13 @@ impl Transaction {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub fn sign(&mut self, secret_key: &str) {
-        let hash_bytes = self.hash.as_bytes();
-        let (r, s, v) = signature_keys::SignatureKeys::sign(secret_key, hash_bytes);
+        let bytes = self.hash.clone().into_bytes();
+        self.sign_bytes(secret_key, &bytes);
+    }
 
+    fn sign_bytes(&mut self, secret_key: &str, bytes: &[u8]) {
+        let (r, s, v) = SignatureKeys::sign(secret_key, bytes);
         self.signature_r = r;
         self.signature_s = s;
         self.signature_v = v;
@@ -119,26 +120,16 @@ impl Transaction {
 
     /// Sign the way a wallet does: `personal_sign` over `wallet_signing_text`. For tests and tools;
     /// real wallets sign in the browser.
-    #[allow(dead_code)]
     pub fn sign_personal(&mut self, secret_key: &str) {
         let bytes = SignatureKeys::personal_sign_bytes(self.wallet_signing_text().as_bytes());
-        let (r, s, v) = SignatureKeys::sign(secret_key, &bytes);
-
-        self.signature_r = r;
-        self.signature_s = s;
-        self.signature_v = v;
+        self.sign_bytes(secret_key, &bytes);
     }
 
     /// Sign the way TronLink does: TIP-191 `signMessageV2` over `wallet_signing_text`. For tests
     /// and tools; real wallets sign in the browser.
-    #[allow(dead_code)]
     pub fn sign_tron(&mut self, secret_key: &str) {
         let bytes = SignatureKeys::tron_sign_bytes(self.wallet_signing_text().as_bytes());
-        let (r, s, v) = SignatureKeys::sign(secret_key, &bytes);
-
-        self.signature_r = r;
-        self.signature_s = s;
-        self.signature_v = v;
+        self.sign_bytes(secret_key, &bytes);
     }
 
     /// Three signatures are accepted, and each one is checked against a different digest, so one

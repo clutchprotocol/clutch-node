@@ -30,21 +30,6 @@ pub struct Blockchain {
     max_block_transactions: usize,
 }
 
-/// Check an authority set against the arithmetic Aura builds on it.
-///
-/// Two of these are latent panics rather than misconfigurations, because both the slot duration
-/// (`60 / len`) and the slot-to-author mapping (`authorities[slot % len]`) divide by that length:
-///
-/// - **Empty**: `60 / 0` panics while constructing the chain, with a divide-by-zero and no hint
-///   about which value was wrong.
-/// - **More than 60**: the slot duration truncates to `0`, the node starts and peers fine, and
-///   then `slot_at_time` divides by zero the first time it computes a slot. A panic after a
-///   successful boot is much worse to diagnose than one during it.
-/// - **Duplicates**: not a panic. The repeated authority quietly takes two slots per round, which
-///   reads as bad luck in block distribution rather than as a typo in a config file.
-///
-/// This is a hard ceiling on validator-set size that nothing else states, so it matters when the
-/// set grows beyond the three of the current testnet.
 /// Check the mint authority set against the threshold configured with it.
 ///
 /// A threshold nothing can satisfy is the dangerous direction: minting would be permanently
@@ -87,6 +72,21 @@ fn validate_mint_authority_set(chain_init: &ChainInit) -> Result<(), String> {
     Ok(())
 }
 
+/// Check an authority set against the arithmetic Aura builds on it.
+///
+/// Two of these are latent panics rather than misconfigurations, because both the slot duration
+/// (`60 / len`) and the slot-to-author mapping (`authorities[slot % len]`) divide by that length:
+///
+/// - **Empty**: `60 / 0` panics while constructing the chain, with a divide-by-zero and no hint
+///   about which value was wrong.
+/// - **More than 60**: the slot duration truncates to `0`, the node starts and peers fine, and
+///   then `slot_at_time` divides by zero the first time it computes a slot. A panic after a
+///   successful boot is much worse to diagnose than one during it.
+/// - **Duplicates**: not a panic. The repeated authority quietly takes two slots per round, which
+///   reads as bad luck in block distribution rather than as a typo in a config file.
+///
+/// This is a hard ceiling on validator-set size that nothing else states, so it matters when the
+/// set grows beyond the three of the current testnet.
 fn validate_authorities(authorities: &[String]) -> Result<(), String> {
     if authorities.is_empty() {
         return Err("the authority set is empty; there would be no slot to author in".to_string());
@@ -94,7 +94,8 @@ fn validate_authorities(authorities: &[String]) -> Result<(), String> {
     // 60 is the numerator of the step-duration division, so past it the duration truncates to zero.
     if authorities.len() > 60 {
         return Err(format!(
-            "{} authorities exceeds the maximum of 60: step duration is `60 / len` seconds, which              truncates to 0 above that and makes every slot calculation divide by zero",
+            "{} authorities exceeds the maximum of 60: step duration is `60 / len` seconds, which \
+             truncates to 0 above that and makes every slot calculation divide by zero",
             authorities.len()
         ));
     }
@@ -221,7 +222,6 @@ impl Blockchain {
         Block::get_genesis_block(&self.db)
     }
 
-    #[allow(dead_code)]
     pub fn get_account_state(&self, public_key: &String) -> AccountState {
         AccountState::get_current_state(public_key, &self.db)
     }
@@ -356,7 +356,6 @@ impl Blockchain {
         Block::get_blocks_by_indexes(&self.db, indexes)
     }
 
-    #[allow(dead_code)]
     pub fn current_author(&self) -> &String {
         self.consensus.current_author()
     }
@@ -487,18 +486,6 @@ impl Blockchain {
         Ok(new_block)
     }
 
-    /// Authoring-time counterpart to the block-level guards in
-    /// `Transaction::validate_transactions`: drop pending txs that cannot legally share a
-    /// block, keeping at most one per sender (deferred-batch staleness on the balance/nonce
-    /// mints CLT), at most one per exactly-once ref (two identical `processed_ref_{ref}`
-    /// writes collapse, breaking exactly-once across Mint and Burn), and at most one writer
-    /// per account balance (two txs from different senders writing one account collapse the
-    /// same way — the Burn reserve drain). Without this the author would keep drafting a block
-    /// its own validation rejects and never make progress.
-    ///
-    /// Ordering is lowest nonce, tie-broken by hash, so every node keeps the same winner;
-    /// the losers stay in the pool for a later block.
-    /// ponytail: one tx/account/block; lift with incremental intra-block state.
     /// Transactions that can never become valid again, removed from the pool rather than retried
     /// until the end of time.
     ///
@@ -535,6 +522,18 @@ impl Blockchain {
             .collect()
     }
 
+    /// Authoring-time counterpart to the block-level guards in
+    /// `Transaction::validate_transactions`: drop pending txs that cannot legally share a
+    /// block, keeping at most one per sender (deferred-batch staleness on the balance/nonce
+    /// mints CLT), at most one per exactly-once ref (two identical `processed_ref_{ref}`
+    /// writes collapse, breaking exactly-once across Mint and Burn), and at most one writer
+    /// per account balance (two txs from different senders writing one account collapse the
+    /// same way — the Burn reserve drain). Without this the author would keep drafting a block
+    /// its own validation rejects and never make progress.
+    ///
+    /// Ordering is lowest nonce, tie-broken by hash, so every node keeps the same winner;
+    /// the losers stay in the pool for a later block.
+    /// ponytail: one tx/account/block; lift with incremental intra-block state.
     fn drop_intra_block_conflicts(
         db: &Database,
         mut transactions: Vec<Transaction>,
@@ -570,29 +569,23 @@ impl Blockchain {
 
     fn blockchain_write_to_file(&mut self) {
         match self.get_blocks() {
-            Ok(blocks) => match serde_json::to_string_pretty(&blocks) {
-                Ok(json_str) => {
-                    let file_name = format!("{}_blockchain_blocks", &self.name);
-                    if let Err(e) = write_to_file(&json_str, &file_name) {
-                        error!("{}", e);
-                    }
-                }
-                Err(e) => error!("Failed to serialize blocks: {}", e),
-            },
+            Ok(blocks) => self.dump_json(&blocks, "blockchain_blocks"),
             Err(e) => error!("Failed to retrieve blocks: {}", e),
         }
-
         match self.get_transactions_from_pool() {
-            Ok(transactions) => match serde_json::to_string_pretty(&transactions) {
-                Ok(json_str) => {
-                    let file_name = format!("{}_tx_pool", &self.name);
-                    if let Err(e) = write_to_file(&json_str, &file_name) {
-                        error!("{}", e);
-                    }
-                }
-                Err(e) => error!("Failed to serialize transactions: {}", e),
-            },
+            Ok(transactions) => self.dump_json(&transactions, "tx_pool"),
             Err(e) => error!("Failed to retrieve transactions in transaction pool: {}", e),
+        }
+    }
+
+    fn dump_json<T: serde::Serialize>(&self, value: &T, suffix: &str) {
+        match serde_json::to_string_pretty(value) {
+            Ok(json_str) => {
+                if let Err(e) = write_to_file(&json_str, &format!("{}_{}", self.name, suffix)) {
+                    error!("{}", e);
+                }
+            }
+            Err(e) => error!("Failed to serialize {}: {}", suffix, e),
         }
     }
 }
@@ -660,9 +653,6 @@ mod tests {
         )
     }
 
-    /// The filter needs a `Database` to resolve RidePay/RideCancel counterparties. None of
-    /// these cases reads state, so any empty DB will do — one per test so they can still run
-    /// in parallel, deleted at the end so re-runs start clean.
     /// Write an account's nonce the way the chain stores it: big-endian u64 under
     /// `account_nonce_<canonical>` in the `state` column family. There is no setter on
     /// `AccountState` -- nonces only ever move by applying a transaction -- so the test writes the
@@ -685,6 +675,9 @@ mod tests {
         db.put("tx_pool", &key, &value).expect("pool transaction");
     }
 
+    /// The conflict filter needs a `Database` to resolve RidePay/RideCancel counterparties. None
+    /// of these cases reads state, so any empty DB will do — one per test so they can still run
+    /// in parallel, deleted at the end so re-runs start clean.
     fn scratch_db(name: &str) -> Database {
         let _ = std::fs::remove_dir_all(format!("{}.db", name));
         Database::new_db(name)

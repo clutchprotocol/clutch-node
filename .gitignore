@@ -7,3 +7,6 @@
 
 # subagent-driven-development scratch (ledger, briefs, review packages)
 .superpowers/
+
+# cargo-sweep marker
+sweep.timestamp

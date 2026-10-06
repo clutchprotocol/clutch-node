@@ -59,17 +59,6 @@ impl StateUpdate {
             effect: None,
         }
     }
-
-    pub fn from_legacy(item: Option<(Vec<u8>, Vec<u8>)>) -> Self {
-        match item {
-            Some((k, v)) => Self::storage_only(k, v),
-            None => Self::default(),
-        }
-    }
-
-    pub fn from_legacy_vec(items: Vec<Option<(Vec<u8>, Vec<u8>)>>) -> Vec<Self> {
-        items.into_iter().map(Self::from_legacy).collect()
-    }
 }
 
 pub fn tx_effects_key(tx_hash: &str) -> Vec<u8> {
@@ -115,8 +104,7 @@ pub fn persist_tx_effects(
 
     let stored: Vec<StoredBalanceEffect> = effects
         .iter()
-        .enumerate()
-        .map(|(seq, effect)| StoredBalanceEffect {
+        .map(|effect| StoredBalanceEffect {
             effect: effect.clone(),
             block_height,
             tx_hash: Some(tx_hash.to_string()),
@@ -131,23 +119,15 @@ pub fn persist_tx_effects(
     let tx_value = serde_json::to_string(&stored).unwrap().into_bytes();
     writes.push((tx_key, tx_value));
 
-    for (seq, effect) in effects.iter().enumerate() {
+    // Each index entry is the same record the tx-level list holds, serialized on its own.
+    for (seq, record) in stored.iter().enumerate() {
         let index_key = account_effect_index_key(
-            &effect.address,
+            &record.effect.address,
             block_height,
             Some(tx_index),
             seq as u8,
         );
-        let index_value = serde_json::to_string(&StoredBalanceEffect {
-            effect: effect.clone(),
-            block_height,
-            tx_hash: Some(tx_hash.to_string()),
-            tx_index: Some(tx_index),
-            function_call_type: Some(function_call_type.to_string()),
-            timestamp,
-        })
-        .unwrap()
-        .into_bytes();
+        let index_value = serde_json::to_string(record).unwrap().into_bytes();
         writes.push((index_key, index_value));
     }
 
@@ -165,8 +145,7 @@ pub fn persist_block_effects(
 
     let stored: Vec<StoredBalanceEffect> = effects
         .iter()
-        .enumerate()
-        .map(|(_seq, effect)| StoredBalanceEffect {
+        .map(|effect| StoredBalanceEffect {
             effect: effect.clone(),
             block_height,
             tx_hash: None,
@@ -181,10 +160,10 @@ pub fn persist_block_effects(
     let block_value = serde_json::to_string(&stored).unwrap().into_bytes();
     writes.push((block_key, block_value));
 
-    for (seq, effect) in effects.iter().enumerate() {
+    for (seq, record) in stored.iter().enumerate() {
         let index_key =
-            account_effect_index_key(&effect.address, block_height, None, seq as u8);
-        let index_value = serde_json::to_string(&stored[seq]).unwrap().into_bytes();
+            account_effect_index_key(&record.effect.address, block_height, None, seq as u8);
+        let index_value = serde_json::to_string(record).unwrap().into_bytes();
         writes.push((index_key, index_value));
     }
 

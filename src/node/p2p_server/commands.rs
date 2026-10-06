@@ -8,7 +8,6 @@ use tokio::sync::oneshot;
 
 use super::behaviour::DirectMessageRequest;
 
-#[allow(dead_code)]
 pub enum P2PServerCommand {
     SendGossipMessage {
         message: Vec<u8>,
