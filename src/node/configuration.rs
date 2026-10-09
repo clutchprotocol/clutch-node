@@ -54,6 +54,16 @@ pub struct AppConfig {
     pub ride_auto_release_secs: u64,
     pub ride_request_referrer_fee_bps: u16,
     pub ride_offer_referrer_fee_bps: u16,
+    /// The EIP-155 chain id wallets sign with (the Hub API's `wallet_chain_id`). With
+    /// `wallet_transfers_from_block`, it turns on transfers signed by MetaMask and other Ethereum
+    /// wallets. Both unset: refused. A consensus rule held in config, so every validator of a chain
+    /// must carry the same two values; see `WalletTransferRule`.
+    #[serde(default)]
+    pub wallet_chain_id: Option<u64>,
+    /// The first block height that may carry a wallet transfer. Set it ahead of the chain's
+    /// height and roll it to every validator before that height is reached.
+    #[serde(default)]
+    pub wallet_transfers_from_block: Option<u64>,
     pub sync_enabled: bool,
     pub serve_metric_enabled: bool,
     pub serve_metric_addr: String,
@@ -62,6 +72,24 @@ pub struct AppConfig {
 }
 
 impl AppConfig {
+    /// The wallet transfer rule, when both settings are present. One without the other is a
+    /// mistake, and is refused at start rather than half applied.
+    pub fn wallet_transfer_rule(
+        &self,
+    ) -> Result<Option<crate::node::transactions::wallet_transfer::WalletTransferRule>, String> {
+        use crate::node::transactions::wallet_transfer::WalletTransferRule;
+        match (self.wallet_chain_id, self.wallet_transfers_from_block) {
+            (Some(wallet_chain_id), Some(from_block)) => Ok(Some(WalletTransferRule {
+                wallet_chain_id,
+                from_block,
+            })),
+            (None, None) => Ok(None),
+            _ => Err(
+                "set both wallet_chain_id and wallet_transfers_from_block, or neither".to_string(),
+            ),
+        }
+    }
+
     fn from_env(env: &str) -> Result<Self, ConfigError> {
         dotenv().ok();
         let file_path = format!("config/node/{}.toml", env);

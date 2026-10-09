@@ -119,6 +119,12 @@ impl WebSocket {
             "send_raw_transaction" => {
                 Self::handle_send_raw_transaction(params, id, blockchain, command_tx_p2p).await
             }
+            "send_wallet_transaction" => {
+                Self::handle_send_wallet_transaction(params, id, blockchain, command_tx_p2p).await
+            }
+            "get_transaction_by_hash" => {
+                Self::handle_get_transaction_by_hash(params, id, blockchain).await
+            }
             "get_next_nonce" => {
                 Self::handle_get_next_nonce(params, id, blockchain).await
             }
@@ -209,6 +215,85 @@ impl WebSocket {
         Self::submit_transaction(transaction, id, blockchain, command_tx_p2p).await
     }
 
+    /// `send_wallet_transaction`: a signed legacy Ethereum transaction from a wallet, as hex (the
+    /// bare string `eth_sendRawTransaction` carries). Answers `{ "hash": "0x…" }`, the Ethereum
+    /// hash, which is also the hash the node stores it under. See `wallet_transfer.rs`.
+    async fn handle_send_wallet_transaction(
+        params: serde_json::Value,
+        id: serde_json::Value,
+        blockchain: &Arc<Mutex<Blockchain>>,
+        command_tx_p2p: tokio::sync::mpsc::Sender<P2PServerCommand>,
+    ) -> Option<String> {
+        let Some(hex_str) = params.as_str() else {
+            return Some(json_rpc_error_response(
+                -32602,
+                "Invalid params: expected the signed transaction as a hex string",
+                id,
+            ));
+        };
+        let raw = match hex::decode(hex_str.trim_start_matches("0x")) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                return Some(json_rpc_error_response(
+                    -32602,
+                    &format!("Failed to decode hex: {}", e),
+                    id,
+                ))
+            }
+        };
+        let transaction = match blockchain.lock().await.decode_wallet_transaction(&raw) {
+            Ok(tx) => tx,
+            Err(e) => {
+                warn!("Refused a wallet transaction: {}", e);
+                return Some(json_rpc_error_response(-32000, &e, id));
+            }
+        };
+        let hash = transaction.hash.clone();
+        match Self::pool_and_gossip(transaction, blockchain, command_tx_p2p).await {
+            Ok(()) => Some(json_rpc_success_response(serde_json::json!({ "hash": hash }), id)),
+            Err(e) => Some(json_rpc_error_response(-32000, &e, id)),
+        }
+    }
+
+    /// `get_transaction_by_hash`: `{ transaction, block_index, block_hash }`, the last two null
+    /// while it waits in the pool; null when this node does not know the hash.
+    async fn handle_get_transaction_by_hash(
+        params: serde_json::Value,
+        id: serde_json::Value,
+        blockchain: &Arc<Mutex<Blockchain>>,
+    ) -> Option<String> {
+        #[derive(serde::Deserialize)]
+        struct GetTransactionParams {
+            hash: String,
+        }
+        let params: GetTransactionParams = match serde_json::from_value(params) {
+            Ok(p) => p,
+            Err(e) => {
+                let error_msg = format!("Invalid params: expected object with 'hash' field: {}", e);
+                return Some(json_rpc_error_response(-32602, &error_msg, id));
+            }
+        };
+        let blockchain = blockchain.lock().await;
+        match blockchain.get_transaction_by_hash(&params.hash) {
+            Ok(Some((tx, place))) => {
+                let (block_index, block_hash) = match place {
+                    Some((index, hash)) => (serde_json::json!(index), serde_json::json!(hash)),
+                    None => (serde_json::Value::Null, serde_json::Value::Null),
+                };
+                Some(json_rpc_success_response(
+                    serde_json::json!({
+                        "transaction": tx,
+                        "block_index": block_index,
+                        "block_hash": block_hash,
+                    }),
+                    id,
+                ))
+            }
+            Ok(None) => Some(json_rpc_success_response(serde_json::Value::Null, id)),
+            Err(e) => Some(json_rpc_error_response(-32000, &e, id)),
+        }
+    }
+
     /// Pool a decoded transaction and gossip it: the shared tail of both submit methods.
     async fn submit_transaction(
         transaction: Transaction,
@@ -216,19 +301,29 @@ impl WebSocket {
         blockchain: &Arc<Mutex<Blockchain>>,
         command_tx_p2p: tokio::sync::mpsc::Sender<P2PServerCommand>,
     ) -> Option<String> {
+        match Self::pool_and_gossip(transaction, blockchain, command_tx_p2p).await {
+            Ok(()) => Some(json_rpc_success_response(serde_json::json!("Transaction imported"), id)),
+            Err(e) => Some(json_rpc_error_response(-32000, &e, id)),
+        }
+    }
+
+    async fn pool_and_gossip(
+        transaction: Transaction,
+        blockchain: &Arc<Mutex<Blockchain>>,
+        command_tx_p2p: tokio::sync::mpsc::Sender<P2PServerCommand>,
+    ) -> Result<(), String> {
         let blockchain = blockchain.lock().await;
         if let Err(e) = blockchain.add_transaction_to_pool(&transaction) {
             let error_msg = format!("Failed to add transaction: {}", e);
             error!("{}", error_msg);
-            return Some(json_rpc_error_response(-32000, &error_msg, id));
+            return Err(error_msg);
         }
 
         info!("Transaction added to pool from WebSocket.");
 
         let encoded_tx = encode(&transaction);
         P2PServer::gossip_message_command(command_tx_p2p, GossipMessageType::Transaction, &encoded_tx).await;
-
-        Some(json_rpc_success_response(serde_json::json!("Transaction imported"), id))
+        Ok(())
     }
 
     async fn handle_get_next_nonce(

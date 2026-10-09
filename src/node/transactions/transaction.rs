@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
 
 use super::chain_init::ChainInit;
+use super::wallet_transfer::{WalletTransfer, WEI_PER_BASE_UNIT};
 use super::{function_call::FunctionCall, passenger_concurrent};
 #[cfg(test)]
 use super::transfer::Transfer;
@@ -65,7 +66,14 @@ impl Transaction {
     /// re-adds the prefix, so it must be removed again here for the hash to match. `chain_id`
     /// makes the signature network-specific — a transaction signed for one chain hashes (and
     /// therefore verifies) differently on any other, closing a replay path across networks.
+    ///
+    /// A `WalletTransfer` is the exception: its hash is the Ethereum transaction hash, rebuilt
+    /// from its fields and signature, because that is the hash the wallet shows and asks about.
+    /// An unbuildable one hashes to the empty string, which `verify_hash` then refuses.
     fn calculate_hash(&self) -> String {
+        if let FunctionCall::WalletTransfer(wt) = &self.data {
+            return WalletTransfer::transaction_hash(self, wt).unwrap_or_default();
+        }
         let from_no_prefix = self.from.strip_prefix("0x").unwrap_or(&self.from);
         let mut stream = RlpStream::new();
         stream.begin_list(4);
@@ -142,7 +150,13 @@ impl Transaction {
     ///    ties `hash` to `chain_id`, and the text names the chain, so the signature cannot move;
     /// 3. TronLink signed the same text with TIP-191 `signMessageV2`: the same key and the same
     ///    address, with the prefix `\x19TRON Signed Message:\n` in place of the Ethereum one.
+    ///
+    /// A `WalletTransfer` takes none of the three: only its own Ethereum signature, see
+    /// `WalletTransfer::verify_signature`.
     fn verify_signature(&self) -> Result<(), String> {
+        if let FunctionCall::WalletTransfer(wt) = &self.data {
+            return WalletTransfer::verify_signature(self, wt);
+        }
         let from_address = &self.from;
         let r = &self.signature_r;
         let s = &self.signature_s;
@@ -342,6 +356,7 @@ impl Transaction {
         }
         match &self.data {
             FunctionCall::Transfer(t) => accounts.push(canon(&t.to)),
+            FunctionCall::WalletTransfer(t) => accounts.push(canon(&t.to)),
             FunctionCall::Mint(m) => accounts.push(canon(&m.to)),
             FunctionCall::RidePay(p) => {
                 // Driver, request referrer and offer referrer — the accounts RidePay's
@@ -428,6 +443,9 @@ impl Transaction {
                 self.chain_id, params.chain_id
             ));
         }
+        if let FunctionCall::WalletTransfer(wt) = &self.data {
+            self.verify_wallet_transfer_rule(wt, db, &params)?;
+        }
         if !self.fee_exempt() {
             let required = self
                 .sender_direct_debit()
@@ -446,6 +464,46 @@ impl Transaction {
         Ok(())
     }
 
+    /// The chain-level conditions on a wallet transfer: this chain accepts them, from this
+    /// height, for this wallet chain id, and the wallet authorized at least the flat fee.
+    fn verify_wallet_transfer_rule(
+        &self,
+        wt: &WalletTransfer,
+        db: &Database,
+        params: &ChainInit,
+    ) -> Result<(), String> {
+        let rule = db
+            .wallet_transfers()
+            .ok_or("Sending from a wallet is not enabled on this chain.")?;
+        // The height this transaction would land at: the next block. When a block is imported,
+        // its transactions are validated before it is stored, so this is that block's height.
+        let next_height = match crate::node::blocks::block::Block::get_latest_block(db)? {
+            Some(b) => b.index as u64 + 1,
+            None => 0,
+        };
+        if next_height < rule.from_block {
+            return Err(format!(
+                "Sending from a wallet starts at block {} on this chain.",
+                rule.from_block
+            ));
+        }
+        if wt.wallet_chain_id != rule.wallet_chain_id {
+            return Err(format!(
+                "Verification failed: signed for chain id {}, this network is {}",
+                wt.wallet_chain_id, rule.wallet_chain_id
+            ));
+        }
+        let fee_wei = params.tx_fee as u128 * WEI_PER_BASE_UNIT;
+        if wt.max_fee_wei() < fee_wei {
+            return Err(format!(
+                "The network fee is {} wei (gas price x gas limit); the transaction allows {}.",
+                fee_wei,
+                wt.max_fee_wei()
+            ));
+        }
+        Ok(())
+    }
+
     /// Mint is exempt: the treasury authority mints TO users and may itself hold zero
     /// balance. ChainInit is genesis-only. Everything else pays the flat fee.
     fn fee_exempt(&self) -> bool {
@@ -456,6 +514,7 @@ impl Transaction {
     fn sender_direct_debit(&self) -> u64 {
         match &self.data {
             FunctionCall::Transfer(t) => t.value,
+            FunctionCall::WalletTransfer(t) => t.value,
             FunctionCall::Burn(b) => b.amount,
             _ => 0,
         }
@@ -497,6 +556,7 @@ impl Transaction {
     fn verify_state(&self, db: &Database) -> Result<(), String> {
         match &self.data {
             FunctionCall::Transfer(transfer) => transfer.verify_state(&self.from, db),
+            FunctionCall::WalletTransfer(wt) => wt.as_transfer().verify_state(&self.from, db),
             FunctionCall::RideRequest(ride_request) => {
                 ride_request.verify_state(&self.from, db)?;
                 if passenger_concurrent::passenger_has_concurrent_request(db, &self.from)? {
@@ -534,6 +594,7 @@ impl Transaction {
             FunctionCall::Burn(_) => "Burn",
             FunctionCall::RideRequestCancel(_) => "RideRequestCancel",
             FunctionCall::ChainInit(_) => "ChainInit",
+            FunctionCall::WalletTransfer(_) => "WalletTransfer",
         }
     }
 
@@ -547,6 +608,9 @@ impl Transaction {
         let fee = self.effective_fee(block_author, params);
         let mut states = match &self.data {
             FunctionCall::Transfer(transfer) => transfer.state_transaction(&self.from, db, fee),
+            FunctionCall::WalletTransfer(wt) => {
+                wt.as_transfer().state_transaction(&self.from, db, fee)
+            }
             FunctionCall::RideRequest(ride_request) => {
                 ride_request.state_transaction(&self.from, &self.hash, db)
             }
@@ -590,6 +654,7 @@ impl Transaction {
         let fee_handled_in_type = matches!(
             &self.data,
             FunctionCall::Transfer(_)
+                | FunctionCall::WalletTransfer(_)
                 | FunctionCall::RideAcceptance(_)
                 | FunctionCall::RideCancel(_)
                 | FunctionCall::RidePay(_)

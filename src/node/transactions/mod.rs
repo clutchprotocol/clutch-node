@@ -14,3 +14,4 @@ pub mod transaction;
 pub mod transaction_pool;
 pub mod transfer;
 pub mod tx_hash_pointer;
+pub mod wallet_transfer;

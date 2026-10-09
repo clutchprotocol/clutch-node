@@ -1,9 +1,14 @@
 use rocksdb::{ColumnFamilyDescriptor, DBWithThreadMode, Options, SingleThreaded, WriteBatch, DB};
 use std::env;
 
+use crate::node::transactions::wallet_transfer::WalletTransferRule;
+
 #[derive(Debug)]
 pub struct Database {
     db: Option<DBWithThreadMode<SingleThreaded>>,
+    /// When this node accepts wallet transfers. Config, not state, but read wherever a
+    /// transaction is validated, and every one of those places holds the database.
+    wallet_transfers: Option<WalletTransferRule>,
 }
 
 impl Database {
@@ -35,7 +40,18 @@ impl Database {
         )
         .expect("Failed to open database with specified column families");
 
-        Database { db: Some(db) }
+        Database {
+            db: Some(db),
+            wallet_transfers: None,
+        }
+    }
+
+    pub fn wallet_transfers(&self) -> Option<WalletTransferRule> {
+        self.wallet_transfers
+    }
+
+    pub fn set_wallet_transfers(&mut self, rule: Option<WalletTransferRule>) {
+        self.wallet_transfers = rule;
     }
 
     pub fn get(&self, cf_name: &str, key: &[u8]) -> Result<Option<Vec<u8>>, String> {

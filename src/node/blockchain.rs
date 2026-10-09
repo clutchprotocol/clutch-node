@@ -18,6 +18,7 @@ use crate::node::transactions::ride_acceptance::{AvailableActiveTrip, AvailableR
 use crate::node::transactions::ride_offer::{AvailableRideOffer, RideOffer};
 use crate::node::transactions::ride_request::{AvailableRideRequest, MapBounds, RideRequest};
 use crate::node::transactions::transaction::Transaction;
+use crate::node::transactions::wallet_transfer::{WalletTransfer, WalletTransferRule};
 
 pub struct Blockchain {
     pub name: String,
@@ -435,6 +436,51 @@ impl Blockchain {
         assert!(max > 0, "max_block_transactions must be at least 1");
         self.max_block_transactions = max;
         self
+    }
+
+    /// Accept wallet transfers (see `wallet_transfer.rs`) from `rule.from_block`; `None` refuses
+    /// them. A consensus rule held in config: every validator of the chain must carry the same.
+    pub fn with_wallet_transfers(mut self, rule: Option<WalletTransferRule>) -> Self {
+        self.db.set_wallet_transfers(rule);
+        self
+    }
+
+    /// A raw signed Ethereum transaction to a node transaction on this chain. Validation is
+    /// `add_transaction_to_pool`'s.
+    pub fn decode_wallet_transaction(&self, raw: &[u8]) -> Result<Transaction, String> {
+        WalletTransfer::decode_raw(raw, self.chain_init.chain_id)
+    }
+
+    /// A transaction by hash: from its block when it is in one, with that block's index and hash,
+    /// else from the pool. The hash matches with or without `0x`, in any case.
+    pub fn get_transaction_by_hash(
+        &self,
+        hash: &str,
+    ) -> Result<Option<(Transaction, Option<(u64, String)>)>, String> {
+        let bare = hash
+            .trim_start_matches("0x")
+            .trim_start_matches("0X")
+            .to_ascii_lowercase();
+        let same = |h: &str| h.trim_start_matches("0x").eq_ignore_ascii_case(&bare);
+        for key in [format!("0x{}", bare), bare.clone()] {
+            if let Some(effect) = self.get_tx_balance_effects(&key).first() {
+                let height = effect.block_height;
+                if let Some(block) = self
+                    .get_blocks_by_indexes(vec![height as usize])?
+                    .into_iter()
+                    .next()
+                {
+                    if let Some(tx) = block.transactions.iter().find(|t| same(&t.hash)) {
+                        return Ok(Some((tx.clone(), Some((block.index as u64, block.hash.clone())))));
+                    }
+                }
+            }
+        }
+        Ok(self
+            .get_transactions_from_pool()?
+            .into_iter()
+            .find(|t| same(&t.hash))
+            .map(|t| (t, None)))
     }
 
     pub fn author_new_block(&self) -> Result<Block, String> {

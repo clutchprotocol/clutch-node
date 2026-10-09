@@ -62,4 +62,9 @@ fn initialize_blockchain(config: &AppConfig) -> Blockchain {
         chain_init,
     )
     .with_max_block_transactions(config.max_block_transactions)
+    .with_wallet_transfers(
+        config
+            .wallet_transfer_rule()
+            .unwrap_or_else(|e| panic!("invalid wallet transfer config: {e}")),
+    )
 }
