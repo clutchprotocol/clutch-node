@@ -7,7 +7,7 @@ use super::mint::Mint;
 use super::{
     ride_acceptance::RideAcceptance, ride_cancel::RideCancel, ride_offer::RideOffer,
     ride_pay::RidePay, ride_request::RideRequest, ride_request_cancel::RideRequestCancel,
-    transfer::Transfer,
+    transfer::Transfer, wallet_transfer::WalletTransfer,
 };
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -23,6 +23,9 @@ pub enum FunctionCall {
     Burn(Burn),
     RideRequestCancel(RideRequestCancel),
     ChainInit(ChainInit),
+    /// A Transfer signed by an Ethereum wallet as a legacy Ethereum transaction. See
+    /// `wallet_transfer.rs`.
+    WalletTransfer(WalletTransfer),
 }
 
 impl fmt::Display for FunctionCall {
@@ -38,6 +41,7 @@ impl fmt::Display for FunctionCall {
             FunctionCall::Burn(args) => write!(f, "Burn: {:?}", args),
             FunctionCall::RideRequestCancel(args) => write!(f, "RideRequestCancel: {:?}", args),
             FunctionCall::ChainInit(args) => write!(f, "ChainInit: {:?}", args),
+            FunctionCall::WalletTransfer(args) => write!(f, "WalletTransfer: {:?}", args),
         }
     }
 }

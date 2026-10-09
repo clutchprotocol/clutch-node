@@ -22,6 +22,7 @@ use super::transactions::ride_pay::RidePay;
 use super::transactions::ride_request::RideRequest;
 use super::transactions::ride_request_cancel::RideRequestCancel;
 use super::transactions::transfer::Transfer;
+use super::transactions::wallet_transfer::WalletTransfer;
 
 impl Encodable for FunctionCall {
     fn rlp_append(&self, stream: &mut RlpStream) {
@@ -76,6 +77,11 @@ impl Encodable for FunctionCall {
                 stream.append(&9u8); // Tag for ChainInit (genesis-only)
                 stream.append(args);
             }
+            FunctionCall::WalletTransfer(args) => {
+                stream.begin_list(2);
+                stream.append(&10u8); // Tag for WalletTransfer (node-built, never from the SDK)
+                stream.append(args);
+            }
         }
     }
 }
@@ -128,6 +134,10 @@ impl Decodable for FunctionCall {
             9 => {
                 let args: ChainInit = rlp.val_at(1)?;
                 Ok(FunctionCall::ChainInit(args))
+            }
+            10 => {
+                let args: WalletTransfer = rlp.val_at(1)?;
+                Ok(FunctionCall::WalletTransfer(args))
             }
             _ => Err(DecoderError::Custom("Unknown FunctionCall variant")),
         }
