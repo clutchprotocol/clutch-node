@@ -22,6 +22,7 @@ use super::transactions::ride_pay::RidePay;
 use super::transactions::ride_request::RideRequest;
 use super::transactions::ride_request_cancel::RideRequestCancel;
 use super::transactions::transfer::Transfer;
+use super::transactions::session_key::SessionKey;
 use super::transactions::wallet_transfer::WalletTransfer;
 
 impl Encodable for FunctionCall {
@@ -82,6 +83,11 @@ impl Encodable for FunctionCall {
                 stream.append(&10u8); // Tag for WalletTransfer (node-built, never from the SDK)
                 stream.append(args);
             }
+            FunctionCall::SessionKey(args) => {
+                stream.begin_list(2);
+                stream.append(&11u8); // Tag for SessionKey
+                stream.append(args);
+            }
         }
     }
 }
@@ -138,6 +144,10 @@ impl Decodable for FunctionCall {
             10 => {
                 let args: WalletTransfer = rlp.val_at(1)?;
                 Ok(FunctionCall::WalletTransfer(args))
+            }
+            11 => {
+                let args: SessionKey = rlp.val_at(1)?;
+                Ok(FunctionCall::SessionKey(args))
             }
             _ => Err(DecoderError::Custom("Unknown FunctionCall variant")),
         }
