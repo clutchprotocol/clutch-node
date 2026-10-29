@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use sha3::{Digest, Keccak256};
 
 use super::chain_init::ChainInit;
+use super::session_key::SessionKey;
 use super::wallet_transfer::{WalletTransfer, WEI_PER_BASE_UNIT};
 use super::{function_call::FunctionCall, passenger_concurrent};
 #[cfg(test)]
@@ -189,6 +190,30 @@ impl Transaction {
         }
     }
 
+    /// The account's own signature, or else a signature by the session key the account has
+    /// authorized and that has not expired. A session key signs the hash string, like the SDK's
+    /// local key, and only for the call types `SessionKey::allows`. Authorizing or revoking a key
+    /// always needs the account's own signature.
+    fn verify_signature_or_session(&self, db: &Database) -> Result<(), String> {
+        let own = self.verify_signature();
+        if own.is_ok() || !SessionKey::allows(&self.data) {
+            return own;
+        }
+        let Some(session_key) = SessionKey::active_for(&self.from, db)? else {
+            return own;
+        };
+        let signer = SignatureKeys::recover_address(
+            self.hash.as_bytes(),
+            &self.signature_r,
+            &self.signature_s,
+            self.signature_v,
+        );
+        match signer {
+            Ok(addr) if super::address::canonical_account_address(&addr) == session_key => Ok(()),
+            _ => own,
+        }
+    }
+
     pub fn validate_transactions(
         db: &Database,
         transactions: &Vec<Transaction>,
@@ -358,6 +383,7 @@ impl Transaction {
             FunctionCall::Transfer(t) => accounts.push(canon(&t.to)),
             FunctionCall::WalletTransfer(t) => accounts.push(canon(&t.to)),
             FunctionCall::Mint(m) => accounts.push(canon(&m.to)),
+            FunctionCall::SessionKey(_) => {}
             FunctionCall::RidePay(p) => {
                 // Driver, request referrer and offer referrer — the accounts RidePay's
                 // `legs` credit, reached by the same acceptance -> offer -> request walk.
@@ -435,7 +461,7 @@ impl Transaction {
 
     pub fn validate_transaction(&self, db: &Database) -> Result<(), String> {
         self.verify_hash()?;
-        self.verify_signature()?;
+        self.verify_signature_or_session(db)?;
         let params = ChainInit::get(db)?;
         if self.chain_id != params.chain_id {
             return Err(format!(
@@ -579,6 +605,7 @@ impl Transaction {
                 ride_request_cancel.verify_state(&self.from, db)
             }
             FunctionCall::ChainInit(chain_init) => chain_init.verify_state(&self.from, db),
+            FunctionCall::SessionKey(sk) => sk.verify_state(&self.from),
         }
     }
 
@@ -595,6 +622,7 @@ impl Transaction {
             FunctionCall::RideRequestCancel(_) => "RideRequestCancel",
             FunctionCall::ChainInit(_) => "ChainInit",
             FunctionCall::WalletTransfer(_) => "WalletTransfer",
+            FunctionCall::SessionKey(_) => "SessionKey",
         }
     }
 
@@ -644,6 +672,7 @@ impl Transaction {
                 ride_request_cancel.state_transaction(&self.hash, db)
             }
             FunctionCall::ChainInit(chain_init) => chain_init.state_transaction(db),
+            FunctionCall::SessionKey(sk) => sk.state_transaction(&self.from),
         };
 
         // Standalone fee debit ONLY for types that never write the sender's balance
