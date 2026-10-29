@@ -3,6 +3,8 @@ use dotenv::dotenv;
 use serde::Deserialize;
 use tracing::info;
 
+use crate::node::aura::PastAuthoritySet;
+
 /// 1,000 transactions per authored block.
 ///
 /// A bound, not a tuned throughput figure. Nothing limited block size before this, so a pool that
@@ -26,6 +28,13 @@ pub struct AppConfig {
     pub developer_mode: bool,
     pub websocket_addr: String,
     pub authorities: Vec<String>,
+    /// The authority sets this chain had before `authorities`, oldest first, as `[[previous_authorities]]`
+    /// tables with `until_block` (the last block that set authored) and `authorities`. Add one each
+    /// time the set is replaced, with the set that is being retired: without it a node that is behind
+    /// the rotation, or new, cannot sync past it. A TOML array of tables must come after every plain
+    /// key, so put it at the end of the file. Empty is a chain whose set never changed.
+    #[serde(default)]
+    pub previous_authorities: Vec<PastAuthoritySet>,
     pub listen_addrs: Vec<String>,
     pub bootstrap_nodes: Vec<String>,
     pub block_authoring_enabled: bool,
@@ -104,5 +113,41 @@ impl AppConfig {
         let config = AppConfig::from_env(env)?; 
         info!("Loaded configuration from env {:?}: {:?}", env, config);
         Ok(config)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use config::FileFormat;
+
+    /// The repository's own node config, with `extra` appended: a TOML array of tables has to come
+    /// after every plain key.
+    fn parse(extra: &str) -> AppConfig {
+        let base = std::fs::read_to_string("config/node/node1.toml").expect("config/node/node1.toml");
+        Config::builder()
+            .add_source(File::from_str(&format!("{base}\n{extra}\n"), FileFormat::Toml))
+            .build()
+            .expect("the config builds")
+            .try_deserialize::<AppConfig>()
+            .expect("the config deserializes")
+    }
+
+    #[test]
+    fn previous_authorities_default_to_none() {
+        assert!(parse("").previous_authorities.is_empty());
+    }
+
+    #[test]
+    fn previous_authorities_read_as_tables_oldest_first() {
+        let cfg = parse(
+            "[[previous_authorities]]\nuntil_block = 10\nauthorities = [\"0xaa\", \"0xbb\"]\n\n\
+             [[previous_authorities]]\nuntil_block = 20\nauthorities = [\"0xcc\"]\n",
+        );
+        assert_eq!(cfg.previous_authorities.len(), 2);
+        assert_eq!(cfg.previous_authorities[0].until_block, 10);
+        assert_eq!(cfg.previous_authorities[0].authorities, vec!["0xaa", "0xbb"]);
+        assert_eq!(cfg.previous_authorities[1].until_block, 20);
+        assert_eq!(cfg.previous_authorities[1].authorities, vec!["0xcc"]);
     }
 }
