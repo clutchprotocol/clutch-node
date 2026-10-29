@@ -25,7 +25,11 @@ on:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Not ubuntu-latest. It became 26.04 in October 2026, and that image's newer compiler cannot build
+    # the pinned librocksdb-sys (RocksDB 8.10 headers lack `#include <cstdint>`: "'uint64_t' has not
+    # been declared"). Every earlier green run restored a cached build of it, which hid this until a new
+    # image changed the cache key. 24.04 is the image those runs used. Move off it with a RocksDB upgrade.
+    runs-on: ubuntu-24.04
 
     steps:
       - uses: actions/checkout@v4
