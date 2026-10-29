@@ -7,7 +7,7 @@ use super::consensus::Consensus;
 use super::p2p_server::handshake::Handshake;
 use super::transactions::transaction_pool::TransactionPool;
 use crate::node::account_state::AccountState;
-use crate::node::aura::Aura;
+use crate::node::aura::{Aura, PastAuthoritySet};
 use crate::node::balance_effect::{get_account_balance_effects, load_block_effects, load_tx_effects, StoredBalanceEffect};
 use crate::node::database::Database;
 use crate::node::file_utils::write_to_file;
@@ -115,6 +115,28 @@ fn validate_authorities(authorities: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// Check the authority sets a chain had before its current one: each must pass `validate_authorities`
+/// (they feed the same slot arithmetic), and they must come oldest first, each reaching a later block
+/// than the one before it, or the lookup by block height would pick the wrong set.
+fn validate_past_authority_sets(past_sets: &[PastAuthoritySet]) -> Result<(), String> {
+    let mut previous_end: Option<u64> = None;
+    for set in past_sets {
+        validate_authorities(&set.authorities)
+            .map_err(|e| format!("the set valid until block {}: {e}", set.until_block))?;
+        if let Some(end) = previous_end {
+            if set.until_block <= end {
+                return Err(format!(
+                    "previous_authorities must come oldest first, but the set valid until block {} \
+                     follows the one valid until block {end}",
+                    set.until_block
+                ));
+            }
+        }
+        previous_end = Some(set.until_block);
+    }
+    Ok(())
+}
+
 impl Blockchain {
     pub fn new(
         name: String,
@@ -147,7 +169,7 @@ impl Blockchain {
             .unwrap_or_else(|e| panic!("invalid mint authority set: {e}"));
 
         let db = Database::new_db(&name);
-        let step_duration = 60 / authorities.len() as u64;
+        let step_duration = Aura::step_duration_for(authorities.len());
         let blockchain = Blockchain {
             name,
             db,
@@ -445,6 +467,17 @@ impl Blockchain {
         self
     }
 
+    /// The authority sets this chain had before `authorities`, oldest first. Without them a block
+    /// signed by a key that has since been rotated out fails the author check, so a node that is
+    /// behind the rotation, or new, can never sync past it. Only the check of an OLD block reads
+    /// them: who may author and be accepted at the head is decided by `authorities` alone.
+    pub fn with_previous_authorities(mut self, past_sets: Vec<PastAuthoritySet>) -> Self {
+        validate_past_authority_sets(&past_sets)
+            .unwrap_or_else(|e| panic!("invalid previous_authorities: {e}"));
+        self.consensus.past_sets = past_sets;
+        self
+    }
+
     /// A raw signed Ethereum transaction to a node transaction on this chain. Validation is
     /// `add_transaction_to_pool`'s.
     pub fn decode_wallet_transaction(&self, raw: &[u8]) -> Result<Transaction, String> {
@@ -669,6 +702,30 @@ mod tests {
 
         let blank = vec!["0xaaa".to_string(), "   ".to_string()];
         assert!(super::validate_authorities(&blank).is_err(), "a blank entry must be refused");
+    }
+
+    #[test]
+    fn past_authority_sets_must_be_valid_and_oldest_first() {
+        use crate::node::aura::PastAuthoritySet;
+        let set = |until_block: u64, size: usize| PastAuthoritySet {
+            until_block,
+            authorities: (0..size).map(|i| format!("0x{i:040x}")).collect(),
+        };
+
+        assert!(super::validate_past_authority_sets(&[]).is_ok(), "none is the usual case");
+        assert!(super::validate_past_authority_sets(&[set(10, 3), set(20, 3)]).is_ok());
+
+        let backwards = super::validate_past_authority_sets(&[set(20, 3), set(10, 3)])
+            .expect_err("a later set listed first must be refused");
+        assert!(backwards.contains("oldest first"), "got: {backwards}");
+
+        let same_end = super::validate_past_authority_sets(&[set(10, 3), set(10, 3)])
+            .expect_err("two sets ending at one block must be refused");
+        assert!(same_end.contains("oldest first"), "got: {same_end}");
+
+        let empty = super::validate_past_authority_sets(&[set(10, 0)])
+            .expect_err("an empty set must be refused");
+        assert!(empty.contains("until block 10"), "the message must say which set, got: {empty}");
     }
 
     use super::*;
